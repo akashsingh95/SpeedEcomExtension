@@ -1,0 +1,1932 @@
+'use strict';
+
+importScripts('jszip.min.js');
+
+const TAG = '[amazon-sync:bg]';
+
+const MAX_ATTEMPTS = 3;              // 1 initial try + 2 retries
+const LOG_MAX_ENTRIES = 200;
+const TICK_ALARM_NAME = 'amazon-order-sync-tick';
+const RETURNS_TICK_ALARM_NAME = 'amazon-returns-sync-tick';
+const PAYMENTS_TICK_ALARM_NAME = 'amazon-payments-sync-tick';
+const GST_TICK_ALARM_NAME = 'amazon-gst-sync-tick';
+const FBA_RETURNS_TICK_ALARM_NAME = 'amazon-fba-returns-sync-tick';
+const ADS_TICK_ALARM_NAME = 'amazon-ads-sync-tick';
+const BULK_TICK_ALARM_NAME = 'amazon-bulk-sync-tick';
+const TICK_INTERVAL_MINUTES = 0.5;   // Chrome's own alarm floor - matches the old 30s poll interval
+
+// ── Auth: SpeedEcom account login ───────────────────────────────────────────
+// Same flow and same backend as the Meesho/Myntra extensions: GET public-key
+// (PEM) -> RSA-OAEP/SHA-1 encrypt the password -> POST login (email +
+// encrypted password) -> GET profile with the bearer token. Token is cached
+// in chrome.storage.local indefinitely - nothing here clears it automatically.
+const AUTH_ORIGIN = 'https://speedecomsolution.com';
+
+// Production's CORS check rejects requests whose Origin isn't its own web
+// app (the extension's real origin, chrome-extension://<id>, isn't on that
+// allow-list). Fetch can't set Origin/Referer directly - forbidden headers -
+// so this rewrites them at the network layer for AUTH_ORIGIN requests only,
+// making the request look like it came from the site's own login page.
+const AUTH_HEADER_RULE_ID = 1;
+chrome.declarativeNetRequest.updateSessionRules({
+  removeRuleIds: [AUTH_HEADER_RULE_ID],
+  addRules: [
+    {
+      id: AUTH_HEADER_RULE_ID,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [
+          { header: 'Origin', operation: 'set', value: AUTH_ORIGIN },
+          { header: 'Referer', operation: 'set', value: `${AUTH_ORIGIN}/client/login` },
+        ],
+      },
+      condition: {
+        urlFilter: `||${AUTH_ORIGIN.replace(/^https?:\/\//, '')}/api/auth/*`,
+        resourceTypes: ['xmlhttprequest'],
+      },
+    },
+  ],
+}).catch((e) => console.warn(TAG, 'declarativeNetRequest rule failed:', e?.message));
+
+function pemToArrayBuffer(pem) {
+  const b64 = String(pem)
+    .replace(/-----BEGIN PUBLIC KEY-----/, '')
+    .replace(/-----END PUBLIC KEY-----/, '')
+    .replace(/[\r\n\s]+/g, '');
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+async function encryptPassword(password, pem) {
+  const keyData = pemToArrayBuffer(pem);
+  const key = await crypto.subtle.importKey('spki', keyData, { name: 'RSA-OAEP', hash: 'SHA-1' }, false, ['encrypt']);
+  const cipher = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, new TextEncoder().encode(password));
+  return arrayBufferToBase64(cipher);
+}
+
+// Defensive extraction - the exact response shape isn't documented, so
+// search for a JWT-looking string rather than hard-coding one field name.
+function extractToken(body) {
+  const isJwt = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v);
+  const direct = body?.token || body?.accessToken || body?.access_token || body?.jwt ||
+    body?.data?.token || body?.data?.accessToken || body?.result?.token;
+  if (isJwt(direct)) return direct;
+  const stack = [body];
+  while (stack.length) {
+    const cur = stack.shift();
+    if (!cur || typeof cur !== 'object') continue;
+    for (const v of Object.values(cur)) {
+      if (isJwt(v)) return v;
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return null;
+}
+
+function extractUser(body) {
+  const u = body?.data?.user || body?.user || body?.data || body;
+  if (!u || typeof u !== 'object') return {};
+  const name = u.name || u.fullName || u.full_name || u.business_name || u.businessName || u.company || u.displayName || u.username || null;
+  const email = u.email || u.emailAddress || u.email_address || null;
+  // The logged-in user's own `name` is just their personal login account name
+  // (e.g. "demo1") - the seller/company name registered with SpeedEcom lives
+  // on the populated tenant record instead (`GET /api/auth/profile`'s
+  // `tenantId.name`, per server/controllers/authController.js's getProfile).
+  const tenant = u.tenantId?.name || u.tenant?.name || null;
+  return { name, email, tenant };
+}
+
+async function authLogin(email, password) {
+  const pkRes = await fetch(`${AUTH_ORIGIN}/api/auth/public-key`, { headers: { accept: 'application/json' } });
+  const pkBody = await pkRes.json().catch(() => ({}));
+  if (!pkRes.ok || !pkBody?.publicKey) throw new Error(pkBody?.message || 'Could not reach login server.');
+
+  const encryptedPassword = await encryptPassword(password, pkBody.publicKey);
+
+  const loginRes = await fetch(`${AUTH_ORIGIN}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/plain, */*' },
+    body: JSON.stringify({ email, password: encryptedPassword }),
+  });
+  const loginBody = await loginRes.json().catch(() => ({}));
+  if (!loginRes.ok) throw new Error(loginBody?.message || 'Invalid email or password.');
+
+  const token = extractToken(loginBody);
+  if (!token) throw new Error('Login succeeded but no session token was returned.');
+
+  const user = await authFetchProfile(token);
+  await chrome.storage.local.set({ auth: { token, user, loggedInAt: Date.now() } });
+  return user;
+}
+
+async function authFetchProfile(token) {
+  const res = await fetch(`${AUTH_ORIGIN}/api/auth/profile`, {
+    headers: { accept: 'application/json, text/plain, */*', authorization: `Bearer ${token}` },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body?.message || 'Could not load profile.');
+  return extractUser(body);
+}
+
+async function setProgress(progress) {
+  try { await chrome.storage.local.set({ syncProgress: { ...progress, at: Date.now() } }); } catch (_) {}
+}
+
+function newState(overrides) {
+  return { active: true, total: 0, done: 0, failed: 0, failures: [], current: null, finished: false, error: null, paused: false, cancelled: false, ...overrides };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function appendLog(entry) {
+  const line = { ...entry, at: Date.now() };
+  console.log(TAG, line.status, line.filename || '', line.detail || '');
+  try {
+    const { syncLog } = await chrome.storage.local.get('syncLog');
+    const list = Array.isArray(syncLog) ? syncLog : [];
+    list.push(line);
+    while (list.length > LOG_MAX_ENTRIES) list.shift();
+    await chrome.storage.local.set({ syncLog: list });
+  } catch (_) {}
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// ── Resumable job state ─────────────────────────────────────────────────────
+// Everything needed to continue the sync lives in chrome.storage.local, not
+// in a JS variable - a plain in-memory flag (the previous design) is wiped
+// out the instant the service worker is reclaimed, which MV3 does after
+// ~30s of no active work. An `await` sitting on a report-generation wait of
+// up to 45 minutes looks exactly like "no active work" to Chrome, even
+// though chrome.alarms is being used specifically to survive that - the
+// alarm firing later does wake the worker back up, but only by re-running
+// background.js from scratch, which has nothing left to resume the original
+// long-lived async chain. That's what silently orphaned the sync and made
+// Pause/Cancel stop doing anything once the worker had been reclaimed once -
+// closing/reopening the popup didn't cause it, it just made it visible.
+//
+// The fix: persist job state here, and drive it forward with a single
+// fixed-name recurring alarm whose listener is registered unconditionally
+// at the top of this file - so it's always re-armed the instant the worker
+// restarts for any reason, and Pause/Cancel are just storage writes that
+// the next tick (which can run within moments, not up to 30 minutes later)
+// will actually see.
+async function getOrderJob() {
+  const { orderJob } = await chrome.storage.local.get('orderJob');
+  return orderJob || null;
+}
+async function setOrderJob(job) {
+  await chrome.storage.local.set({ orderJob: job });
+}
+async function clearOrderJob() {
+  await chrome.storage.local.remove('orderJob');
+  await chrome.alarms.clear(TICK_ALARM_NAME);
+}
+
+async function getReturnsJob() {
+  const { returnsJob } = await chrome.storage.local.get('returnsJob');
+  return returnsJob || null;
+}
+async function setReturnsJob(job) {
+  await chrome.storage.local.set({ returnsJob: job });
+}
+async function clearReturnsJob() {
+  await chrome.storage.local.remove('returnsJob');
+  await chrome.alarms.clear(RETURNS_TICK_ALARM_NAME);
+}
+
+async function getPaymentsJob() {
+  const { paymentsJob } = await chrome.storage.local.get('paymentsJob');
+  return paymentsJob || null;
+}
+async function setPaymentsJob(job) {
+  await chrome.storage.local.set({ paymentsJob: job });
+}
+async function clearPaymentsJob() {
+  await chrome.storage.local.remove('paymentsJob');
+  await chrome.alarms.clear(PAYMENTS_TICK_ALARM_NAME);
+}
+
+async function getGstJob() {
+  const { gstJob } = await chrome.storage.local.get('gstJob');
+  return gstJob || null;
+}
+async function setGstJob(job) {
+  await chrome.storage.local.set({ gstJob: job });
+}
+async function clearGstJob() {
+  await chrome.storage.local.remove('gstJob');
+  await chrome.alarms.clear(GST_TICK_ALARM_NAME);
+}
+
+async function getFbaReturnsJob() {
+  const { fbaReturnsJob } = await chrome.storage.local.get('fbaReturnsJob');
+  return fbaReturnsJob || null;
+}
+async function setFbaReturnsJob(job) {
+  await chrome.storage.local.set({ fbaReturnsJob: job });
+}
+async function clearFbaReturnsJob() {
+  await chrome.storage.local.remove('fbaReturnsJob');
+  await chrome.alarms.clear(FBA_RETURNS_TICK_ALARM_NAME);
+}
+
+async function getAdsJob() {
+  const { adsJob } = await chrome.storage.local.get('adsJob');
+  return adsJob || null;
+}
+async function setAdsJob(job) {
+  await chrome.storage.local.set({ adsJob: job });
+}
+async function clearAdsJob() {
+  await chrome.storage.local.remove('adsJob');
+  await chrome.alarms.clear(ADS_TICK_ALARM_NAME);
+}
+
+async function getBulkJob() {
+  const { bulkJob } = await chrome.storage.local.get('bulkJob');
+  return bulkJob || null;
+}
+async function setBulkJob(job) {
+  await chrome.storage.local.set({ bulkJob: job });
+}
+async function clearBulkJob() {
+  await chrome.storage.local.remove('bulkJob');
+  await chrome.alarms.clear(BULK_TICK_ALARM_NAME);
+}
+
+// Only one sync (any single category, or one Bulk run) is ever meant to run
+// at a time - the popup disables all Sync buttons together while any one is
+// active. This resolves to whichever job actually exists, so
+// pause/cancel/download-queue logic doesn't need to know or care which
+// category (or bulk run) is currently active.
+async function getActiveJob() {
+  return (await getOrderJob()) || (await getReturnsJob()) || (await getPaymentsJob()) || (await getGstJob()) || (await getFbaReturnsJob()) || (await getAdsJob()) || (await getBulkJob());
+}
+
+// Every file here comes back through content.js's relay (base64-encoded) -
+// unlike Myntra, there's no separate blob host or redirect to worry about,
+// since documentMetadata (Orders), the Returns download links, Payments'
+// download-report, and GST's ondemand-download are all same-origin with the
+// content script that fetches them. task.kind picks which relay message
+// shape to send - Orders and Payments both track a reportId/referenceId
+// they resolve themselves, Returns and GST already have everything needed
+// (a full URL, or documentId+dateRangeCovered+reportType) handed to them by
+// the parsed list/poll response.
+// The GST ondemand-download endpoint's response is itself a ZIP archive
+// (starts with the PK signature) containing one real CSV inside - confirmed
+// live: a file saved straight through with a plain .csv extension opened as
+// raw zip bytes/garbage in Sheets. Unzipped here so the outer ZIP this
+// extension builds ends up with one flat, actually-openable CSV rather than
+// a zip nested inside a zip.
+async function extractGstCsvFromZip(buf) {
+  const inner = await JSZip.loadAsync(buf);
+  const entries = Object.values(inner.files).filter((f) => !f.dir);
+  if (!entries.length) throw new Error('The GST report ZIP was empty.');
+  return entries[0].async('arraybuffer');
+}
+
+async function fetchFileOnce(task, tabId) {
+  let msg;
+  if (task.kind === 'returns') msg = { type: 'FETCH_RETURNS_FILE', url: task.url };
+  else if (task.kind === 'payments') msg = { type: 'FETCH_PAYMENTS_FILE', reportId: task.reportId };
+  else if (task.kind === 'gst') msg = { type: 'FETCH_GST_FILE', documentId: task.documentId, dateRangeCovered: task.dateRangeCovered, reportType: task.reportType };
+  else if (task.kind === 'fbaReturns') msg = { type: 'FETCH_FBA_RETURNS_FILE', referenceId: task.referenceId };
+  else if (task.kind === 'ads') msg = { type: 'FETCH_ADS_FILE', urlString: task.urlString };
+  else msg = { type: 'FETCH_ORDER_FILE', referenceId: task.referenceId };
+  const resp = await sendToTabWithRecovery(tabId, msg);
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not fetch the report file.');
+  if (resp.status >= 400) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.base64) throw new Error('Empty file response.');
+  const buf = base64ToArrayBuffer(resp.base64);
+  if (task.kind === 'gst') return extractGstCsvFromZip(buf);
+  return buf;
+}
+
+// Retries a single task up to MAX_ATTEMPTS on failure (network error, bad
+// status) - never throws, always resolves with a result so the queue can
+// continue to the next task regardless.
+async function fetchFileWithRetry(task, tabId) {
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const buf = await fetchFileOnce(task, tabId);
+      await appendLog({ status: 'downloaded', filename: task.filename });
+      return { ok: true, buf };
+    } catch (e) {
+      lastErr = e;
+      const isFinal = attempt >= MAX_ATTEMPTS;
+      await appendLog({ status: isFinal ? 'failed' : 'retrying', filename: task.filename, detail: e.message, attempt });
+    }
+  }
+  return { ok: false, error: lastErr?.message || 'Unknown error' };
+}
+
+function uniqueZipName(used, name) {
+  let n = (name && String(name).trim()) || 'file';
+  if (!used.has(n)) { used.add(n); return n; }
+  const dot = n.lastIndexOf('.');
+  const base = dot > 0 ? n.slice(0, dot) : n;
+  const ext = dot > 0 ? n.slice(dot) : '';
+  let i = 2;
+  while (used.has(`${base} (${i})${ext}`)) i++;
+  const out = `${base} (${i})${ext}`;
+  used.add(out);
+  return out;
+}
+
+// Sequential by design - fetches one file at a time, packs everything into
+// one JSZip, and triggers exactly one chrome.downloads.download() call for
+// the whole batch. Today Orders only ever produces a single file per sync,
+// but this stays generic/task-based so Payments/Ads/Returns can plug into
+// the exact same engine once those are built.
+//
+// Pause/Cancel here re-read the active job from storage on every iteration
+// rather than trusting an in-memory flag, for the same reason described
+// above - each individual file fetch is fast enough that this phase is far
+// less likely to actually hit the 30s idle-suspend window than the
+// multi-minute report-generation wait, but a long Pause held here for
+// several minutes could in theory still hit it. That's an accepted, narrow
+// gap for now (Orders only ever has one file), not something silently
+// ignored - worth revisiting if Payments/Ads/Returns ever produce large
+// multi-file batches where a long pause mid-download becomes realistic.
+async function processDownloadQueue(tasks, zipBaseName, tabId) {
+  const state = newState({ total: tasks.length });
+  await setProgress(state);
+
+  const zip = new JSZip();
+  const used = new Set();
+
+  for (const task of tasks) {
+    let job = await getActiveJob();
+    while (job?.paused && !job?.cancelled) {
+      state.paused = true;
+      state.current = 'Paused';
+      await setProgress(state);
+      await sleep(300);
+      job = await getActiveJob();
+    }
+    state.paused = false;
+
+    if (job?.cancelled) { state.cancelled = true; break; }
+
+    state.current = task.filename;
+    await setProgress(state);
+
+    const result = await fetchFileWithRetry(task, tabId);
+    if (result.ok) {
+      const zipPath = task.zipFolder ? `${task.zipFolder}/${task.filename}` : task.filename;
+      zip.file(uniqueZipName(used, zipPath), result.buf);
+      state.done++;
+    } else {
+      state.failed++;
+      state.failures.push({ filename: task.filename, reason: result.error });
+    }
+    await setProgress(state);
+  }
+
+  if (state.done > 0 && !state.cancelled) {
+    state.current = 'Generating ZIP...';
+    await setProgress(state);
+
+    // URL.createObjectURL is not available in this MV3 service worker
+    // context, so JSZip generates a base64 string directly instead of a
+    // Blob, and that becomes a data: URL - chrome.downloads.download()
+    // accepts data: URLs natively.
+    const zipBase64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const dataUrl = `data:application/zip;base64,${zipBase64}`;
+    await new Promise((resolve) => {
+      chrome.downloads.download({ url: dataUrl, filename: `${zipBaseName}.zip`, saveAs: false }, (id) => {
+        if (chrome.runtime.lastError) console.warn(TAG, 'zip download:', chrome.runtime.lastError.message);
+        resolve(id);
+      });
+    });
+  }
+
+  if (state.cancelled) {
+    const remaining = tasks.length - state.done - state.failed;
+    state.current = `Cancelled - stopped after ${state.done} file(s) fetched, ${remaining} not attempted. No ZIP was created.`;
+  } else {
+    state.current = null;
+  }
+  state.finished = true;
+  await setProgress(state);
+  return state;
+}
+
+function sendToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (resp) => {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      resolve(resp);
+    });
+  });
+}
+
+async function pingTab(tabId) {
+  try { await sendToTab(tabId, { type: 'PING' }); return true; } catch (_) { return false; }
+}
+
+// content_scripts declared in manifest.json only auto-inject on page
+// load/navigation - a tab that was already open before the extension was
+// installed/reloaded has no content script alive to answer messages, which
+// is what "Receiving end does not exist" means. chrome.scripting.executeScript
+// re-injects it into the tab as it already is, no page reload needed.
+async function ensureContentScript(tabId) {
+  if (await pingTab(tabId)) return true;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  } catch (e) {
+    console.warn(TAG, 'content.js injection failed:', e?.message);
+    return false;
+  }
+  return pingTab(tabId);
+}
+
+// One retry, only for the specific "nothing answered" failure classes (dead
+// content script, or a message port that closed before a response arrived) -
+// any other error (e.g. Amazon's API itself returning an error) is rethrown
+// immediately since retrying it would just repeat the same real failure.
+async function sendToTabWithRecovery(tabId, message) {
+  try {
+    return await sendToTab(tabId, message);
+  } catch (e) {
+    if (!/Receiving end does not exist|Could not establish connection|message port closed/i.test(e.message)) throw e;
+    console.warn(TAG, 'relay failed, attempting recovery:', e.message);
+    if (!(await ensureContentScript(tabId))) throw e;
+    return sendToTab(tabId, message);
+  }
+}
+
+function safeZipName(s) {
+  return (
+    String(s || 'Amazon_Orders')
+      .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '') || 'Amazon_Orders'
+  );
+}
+
+function buildOrderFilename(fromDate, toDate, ext) {
+  return fromDate === toDate ? `Orders_${fromDate}${ext}` : `Orders_${fromDate}_to_${toDate}${ext}`;
+}
+
+// ISO (YYYY-MM-DD, what the date picker gives us) -> the two different
+// formats Amazon's Returns UI actually uses: MM/DD/YYYY for the generate
+// request body (confirmed live: fromDate=06/01/2026&toDate=07/14/2026), and
+// DD-Mon-YYYY for matching against the list's displayed "Date range covered"
+// text (e.g. "01-Jun-2026").
+function isoToUS(iso) {
+  const [y, m, d] = iso.split('-');
+  return `${m}/${d}/${y}`;
+}
+const RETURNS_MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function isoToDisplayDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${String(d).padStart(2, '0')}-${RETURNS_MONTH_ABBR[m - 1]}-${y}`;
+}
+
+function buildReturnsFilename(fromDate, toDate, ext) {
+  return fromDate === toDate ? `Returns_${fromDate}${ext}` : `Returns_${fromDate}_to_${toDate}${ext}`;
+}
+
+function buildPaymentsFilename(fromDate, toDate, ext) {
+  return fromDate === toDate ? `Payments_${fromDate}${ext}` : `Payments_${fromDate}_to_${toDate}${ext}`;
+}
+
+function buildGstFilename(label, fromDate, toDate, ext) {
+  return fromDate === toDate ? `GST_${label}_${fromDate}${ext}` : `GST_${label}_${fromDate}_to_${toDate}${ext}`;
+}
+
+function buildFbaReturnsFilename(fromDate, toDate, ext) {
+  return fromDate === toDate ? `FBA_Returns_${fromDate}${ext}` : `FBA_Returns_${fromDate}_to_${toDate}${ext}`;
+}
+
+// ISO (YYYY-MM-DD) -> Report Central's YYYY/MM/DD - confirmed live from a
+// captured submitDownloadReport request (reportStartDate=2025%2F05%2F01).
+function isoToSlashYMD(iso) {
+  return iso.replace(/-/g, '/');
+}
+
+function buildAdsFilename(fromDate, toDate, ext) {
+  return fromDate === toDate ? `Ads_SearchTerm_${fromDate}${ext}` : `Ads_SearchTerm_${fromDate}_to_${toDate}${ext}`;
+}
+
+// ── Orders report engine ────────────────────────────────────────────────────
+// Confirmed live: All Orders -> Order Date -> Exact dates -> Request. No
+// per-report cooldown was observed here (unlike Myntra's real 15-minute one) -
+// several back-to-back manual requests all succeeded immediately - so unlike
+// Myntra, this always schedules a fresh report rather than trying to detect
+// and reuse an existing one. That reuse-detection would also be fragile here:
+// the status list reformats dates into a locale string ("01/07/26, 12:00:00
+// am India Standard Time") that doesn't round-trip cleanly back to the
+// ISO date this extension sends, so matching by exact string equality
+// would be more likely to silently miss real matches than to save anything.
+
+async function scheduleOrderReport(tabId, { startDate, endDate }) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_ORDER_REPORT', startDate, endDate });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not schedule the Order Report.');
+  if (resp.status >= 400) {
+    throw new Error(resp.body?.message || resp.body?.status?.statusMessage || `Amazon rejected the request (HTTP ${resp.status}).`);
+  }
+  const referenceId = resp.body?.referenceId;
+  if (!referenceId) throw new Error('Report scheduling did not return a reference id.');
+  return referenceId;
+}
+
+async function fetchOrderStatusList(tabId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_ORDER_STATUS' });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the Order Report status list.');
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the report status list.`);
+  return resp.body?.reportRequestResult || [];
+}
+
+// One tick == one short, self-contained unit of work, always safe to be the
+// last thing that ever runs before the worker gets reclaimed - nothing here
+// depends on any state that isn't already sitting in chrome.storage.local by
+// the time the tick returns. tickInFlight only guards against two ticks
+// (a scheduled one and an immediate Pause/Cancel-triggered one) racing each
+// other within the SAME live worker instance - it's fine for this to reset
+// to false on a restart, since a restart already means no tick was actually
+// running anymore.
+let tickInFlight = false;
+async function orderSyncTick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const job = await getOrderJob();
+    if (!job) { await chrome.alarms.clear(TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearOrderJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Requesting Order Report...' }));
+      const referenceId = await scheduleOrderReport(job.tabId, { startDate: job.fromDate, endDate: job.toDate });
+      await setOrderJob({ ...job, phase: 'polling', referenceId });
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Order Report (this can take up to 45 minutes)...' }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const jobs = await fetchOrderStatusList(job.tabId);
+      const found = jobs.find((j) => j.referenceId === job.referenceId);
+      if (found?.stateReady) {
+        await setOrderJob({ ...job, phase: 'downloading' });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (found?.stateNoData) {
+        await clearOrderJob();
+        await setProgress(newState({ finished: true, error: 'No orders were found for that date range.' }));
+        return;
+      }
+      if (found?.requestStateName && /FAIL|ERROR/i.test(found.requestStateName)) {
+        throw new Error(found.requestStateName);
+      }
+      const waitedMs = Date.now() - job.startedAt;
+      if (waitedMs > 50 * 60 * 1000) { // Amazon's own UI says "up to 45 minutes" - pad a little
+        throw new Error('The Order Report did not finish generating within the expected time. Try again shortly.');
+      }
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Order Report (this can take up to 45 minutes)...' }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildOrderFilename(job.fromDate, job.toDate, '.txt');
+      const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'Orders' }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearOrderJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'sync failed:', e?.message);
+    await clearOrderJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+// Registered unconditionally, at the top level, every time this script
+// executes - which is exactly what makes it survive a worker restart. If
+// this were only registered from inside some conditionally-run function
+// (e.g. only when a sync starts), a restart triggered while a sync was
+// mid-flight would come back up with nothing listening for the alarm at all.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === TICK_ALARM_NAME) {
+    orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message));
+  }
+});
+
+async function startOrderSync({ fromDate, toDate, zipName, tabId }) {
+  await setOrderJob({
+    phase: 'scheduling',
+    fromDate, toDate, zipName, tabId,
+    referenceId: null,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  // Run the first tick immediately rather than waiting up to 30s for the
+  // first alarm to fire - the popup should see real progress right away.
+  await orderSyncTick();
+}
+
+// ── Returns report engine ───────────────────────────────────────────────────
+// Confirmed live: All Returns -> Exact dates -> Request, TSV only (XML
+// skipped for now - Speed Ecom's own Uploads page doesn't accept .xml).
+// Two real differences from Orders that shape this whole engine:
+//
+// 1. generate needs a csrfToken read fresh from the page's own DOM
+//    (#returns-report-csrf-token) - confirmed after exhausting every other
+//    static source (DOM search, page source, loaded JS, cookies, storage,
+//    network bodies) that it only ever exists there, read by Amazon's own
+//    requestAdhocReport function via `b("#returns-report-csrf-token").val()`.
+//    That element only exists on the actual Return Reports page, so this
+//    requires the active Seller Central tab to be on it.
+//
+// 2. generate's response carries no report id at all (just an HTML
+//    "SUCCESS" page) - so unlike Orders, there's no id to poll for
+//    directly. Instead, the list is snapshotted for matching (type +
+//    date-range) entries BEFORE calling generate, and polling looks for a
+//    new matching entry whose "Requested On" text wasn't in that snapshot -
+//    a set-difference instead of a returned id or a parsed timestamp,
+//    sidestepping any IST/local-timezone parsing entirely.
+
+async function scheduleReturnsReport(tabId, { fromDate, toDate }) {
+  const resp = await sendToTabWithRecovery(tabId, {
+    type: 'SCHEDULE_RETURNS_REPORT', fromDate: isoToUS(fromDate), toDate: isoToUS(toDate),
+  });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not request the Returns report.');
+  if (resp.csrfMissing) throw new Error("Open Seller Central's Return Reports page (Returns → Return Reports) in this tab, then try again.");
+  if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
+}
+
+async function fetchReturnsListRecords(tabId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_RETURNS_LIST' });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the Returns report list.');
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the returns list.`);
+  return resp.records || [];
+}
+
+function matchingReturnsRecords(records, fromDate, toDate) {
+  const start = isoToDisplayDate(fromDate);
+  const end = isoToDisplayDate(toDate);
+  return records.filter((r) => r.type === 'All Returns' && r.dateRangeStart === start && r.dateRangeEnd === end);
+}
+
+let tickInFlightReturns = false;
+async function returnsSyncTick() {
+  if (tickInFlightReturns) return;
+  tickInFlightReturns = true;
+  try {
+    const job = await getReturnsJob();
+    if (!job) { await chrome.alarms.clear(RETURNS_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearReturnsJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Checking existing Returns reports...' }));
+      const before = await fetchReturnsListRecords(job.tabId);
+      const beforeSet = matchingReturnsRecords(before, job.fromDate, job.toDate).map((r) => r.requestedOn);
+
+      await setProgress(newState({ current: 'Requesting Returns report...' }));
+      await scheduleReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+
+      await setReturnsJob({ ...job, phase: 'polling', beforeSet });
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const records = await fetchReturnsListRecords(job.tabId);
+      const candidates = matchingReturnsRecords(records, job.fromDate, job.toDate)
+        .filter((r) => !job.beforeSet.includes(r.requestedOn));
+
+      if (!candidates.length) {
+        const waitedMs = Date.now() - job.startedAt;
+        if (waitedMs > 50 * 60 * 1000) {
+          throw new Error('The Returns report did not finish generating within the expected time. Try again shortly.');
+        }
+        await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
+        return;
+      }
+
+      const record = candidates[0];
+      if (record.tsv.status === 'ready') {
+        await setReturnsJob({ ...job, phase: 'downloading', tsvUrl: record.tsv.url });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (record.tsv.status === 'no_records') {
+        await clearReturnsJob();
+        await setProgress(newState({ finished: true, error: 'No returns were found for that date range.' }));
+        return;
+      }
+      // still in_progress
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildReturnsFilename(job.fromDate, job.toDate, '.tsv');
+      const tasks = [{ url: job.tsvUrl, filename, zipFolder: 'Returns', kind: 'returns' }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearReturnsJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'returns sync failed:', e?.message);
+    await clearReturnsJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'Returns sync failed.' }));
+  } finally {
+    tickInFlightReturns = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RETURNS_TICK_ALARM_NAME) {
+    returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message));
+  }
+});
+
+async function startReturnsSync({ fromDate, toDate, zipName, tabId }) {
+  await setReturnsJob({
+    phase: 'scheduling',
+    fromDate, toDate, zipName, tabId,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(RETURNS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await returnsSyncTick();
+}
+
+// ── Payments report engine ──────────────────────────────────────────────────
+// Confirmed live: Account Type "All (Unified Reports)" -> Report Type
+// "Transaction" -> Custom Date Range -> Request Report. The cleanest of the
+// three integrations - plain JSON, no CSRF token, and the schedule response
+// hands back a real reportId directly (like Orders), so this polls that one
+// id via a dedicated per-report status endpoint rather than a list. Also
+// confirmed live: no enforced max date-range width here (an 18+ month
+// request was accepted and processed, unlike Orders' 30-day / Returns'
+// 60-day caps) - so no client-side range cap is applied, only the same
+// 2-days-back cutoff used everywhere else for consistency.
+
+async function schedulePaymentsReport(tabId, { fromDate, toDate }) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_PAYMENTS_REPORT', fromDate, toDate });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not schedule the Payments report.');
+  if (resp.status >= 400) throw new Error(resp.body?.message || `Amazon rejected the request (HTTP ${resp.status}).`);
+  const reportId = resp.body?.reportId || resp.body?.generatedReport?.reportId;
+  if (!reportId) throw new Error('Report scheduling did not return a report id.');
+  return reportId;
+}
+
+async function fetchPaymentsReportStatus(tabId, reportId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_PAYMENTS_STATUS', reportId });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the Payments report status.');
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the report status.`);
+  return resp.body;
+}
+
+let tickInFlightPayments = false;
+async function paymentsSyncTick() {
+  if (tickInFlightPayments) return;
+  tickInFlightPayments = true;
+  try {
+    const job = await getPaymentsJob();
+    if (!job) { await chrome.alarms.clear(PAYMENTS_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearPaymentsJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Requesting Payments report...' }));
+      const reportId = await schedulePaymentsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+      await setPaymentsJob({ ...job, phase: 'polling', reportId });
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Payments report...' }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const status = await fetchPaymentsReportStatus(job.tabId, job.reportId);
+      if (status?.status === 'DOWNLOADABLE') {
+        await setPaymentsJob({ ...job, phase: 'downloading' });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (status?.status && /CANCEL|FAIL|ERROR/i.test(status.status)) {
+        throw new Error(`Payments report ${status.status.toLowerCase()}. Try again.`);
+      }
+      const waitedMs = Date.now() - job.startedAt;
+      if (waitedMs > 50 * 60 * 1000) {
+        throw new Error('The Payments report did not finish generating within the expected time. Try again shortly.');
+      }
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Payments report...' }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildPaymentsFilename(job.fromDate, job.toDate, '.csv');
+      const tasks = [{ reportId: job.reportId, filename, zipFolder: 'Payments', kind: 'payments' }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearPaymentsJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'payments sync failed:', e?.message);
+    await clearPaymentsJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'Payments sync failed.' }));
+  } finally {
+    tickInFlightPayments = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === PAYMENTS_TICK_ALARM_NAME) {
+    paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message));
+  }
+});
+
+async function startPaymentsSync({ fromDate, toDate, zipName, tabId }) {
+  await setPaymentsJob({
+    phase: 'scheduling',
+    fromDate, toDate, zipName, tabId,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(PAYMENTS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await paymentsSyncTick();
+}
+
+// ── GST On Demand Reports engine (B2B/B2C) ─────────────────────────────────
+// Confirmed live: GST Reporting -> GST On Demand Reports -> Merchant Tax
+// Report (MTR, always selected - Stock Transfer Report is out of scope) ->
+// B2B or B2C radio -> Exact Dates -> Request Report. reportType is the real
+// UI's own numeric code for that radio: "59300" for B2B, "61200" for B2C.
+//
+// Two things shape this engine, both mirroring Returns:
+// 1. create-report's response is a bare 204 - no report id at all - so like
+//    Returns, the report-history list is snapshotted (by dateRequested,
+//    scoped to this reportType) before scheduling, and polling looks for a
+//    new matching entry not in that snapshot.
+// 2. The eventual download needs three fields read verbatim off the matched
+//    report-history entry once its reportStatus is "Done": reportDocumentId,
+//    dateRangeCovered (joined "start - end", exactly as displayed), and
+//    reportType - confirmed live via fetch/XHR/anchor-click interception,
+//    since create-report never returns a document id itself.
+
+async function scheduleGstReport(tabId, { reportType, fromDate, toDate }) {
+  const startDate = new Date(`${fromDate}T00:00:00+05:30`).getTime();
+  const endDate = new Date(`${toDate}T23:59:59.999+05:30`).getTime();
+  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_GST_REPORT', reportType, startDate, endDate });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not request the GST report.');
+  if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
+}
+
+async function fetchGstReportList(tabId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_GST_LIST' });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the GST report list.');
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the GST report list.`);
+  return resp.body?.reportMetadataList || [];
+}
+
+function matchingGstRecords(records, reportType) {
+  return records.filter((r) => String(r.reportType) === String(reportType));
+}
+
+let tickInFlightGst = false;
+async function gstSyncTick() {
+  if (tickInFlightGst) return;
+  tickInFlightGst = true;
+  try {
+    const job = await getGstJob();
+    if (!job) { await chrome.alarms.clear(GST_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearGstJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Checking existing GST reports...' }));
+      const before = await fetchGstReportList(job.tabId);
+      const beforeSet = matchingGstRecords(before, job.reportType).map((r) => r.dateRequested);
+
+      await setProgress(newState({ current: `Requesting GST ${job.label} report...` }));
+      await scheduleGstReport(job.tabId, { reportType: job.reportType, fromDate: job.fromDate, toDate: job.toDate });
+
+      await setGstJob({ ...job, phase: 'polling', beforeSet });
+      await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const records = await fetchGstReportList(job.tabId);
+      const candidates = matchingGstRecords(records, job.reportType)
+        .filter((r) => !job.beforeSet.includes(r.dateRequested));
+
+      if (!candidates.length) {
+        const waitedMs = Date.now() - job.startedAt;
+        if (waitedMs > 50 * 60 * 1000) {
+          throw new Error('The GST report did not finish generating within the expected time. Try again shortly.');
+        }
+        await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+        return;
+      }
+
+      const record = candidates[0];
+      if (record.reportStatus === 'Done') {
+        if (!record.reportDocumentId) {
+          await clearGstJob();
+          await setProgress(newState({ finished: true, error: 'No records were found for that date range.' }));
+          return;
+        }
+        await setGstJob({
+          ...job,
+          phase: 'downloading',
+          documentId: record.reportDocumentId,
+          dateRangeCovered: (record.dateRangeCovered || []).join(' - '),
+        });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (record.reportStatus && /FAIL|ERROR/i.test(record.reportStatus)) {
+        throw new Error(`GST report ${record.reportStatus.toLowerCase()}. Try again.`);
+      }
+      // still InQueue/InProgress
+      await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildGstFilename(job.label, job.fromDate, job.toDate, '.csv');
+      const tasks = [{
+        documentId: job.documentId,
+        dateRangeCovered: job.dateRangeCovered,
+        reportType: job.reportType,
+        filename,
+        zipFolder: `GST_${job.label}`,
+        kind: 'gst',
+      }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearGstJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'gst sync failed:', e?.message);
+    await clearGstJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'GST sync failed.' }));
+  } finally {
+    tickInFlightGst = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === GST_TICK_ALARM_NAME) {
+    gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message));
+  }
+});
+
+async function startGstSync({ reportType, label, fromDate, toDate, zipName, tabId }) {
+  await setGstJob({
+    phase: 'scheduling',
+    reportType, label, fromDate, toDate, zipName, tabId,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(GST_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await gstSyncTick();
+}
+
+// ── FBA Customer Returns report engine ──────────────────────────────────────
+// Confirmed live: Fulfilment Reports -> FBA customer returns -> Exact dates
+// -> Request .csv Download. A different engine from Standard Returns above -
+// this rides Amazon's generic "Report Central" API
+// (/reportcentral/api/v1/...), with reportFRPId 2610 selecting the Customer
+// Returns report specifically. Structurally closest to Payments: schedule
+// hands back a real reference id directly (no snapshot/diff needed), and
+// polling checks that one id's status - InQueue -> InProgress -> Done.
+// No 60-day range cap and no 2-days-back generation-delay cutoff apply here
+// (unlike every other engine in this file) - confirmed live, a 14+ month
+// range ending on today's date was accepted and generated successfully.
+
+async function scheduleFbaReturnsReport(tabId, { fromDate, toDate }) {
+  const resp = await sendToTabWithRecovery(tabId, {
+    type: 'SCHEDULE_FBA_RETURNS_REPORT',
+    reportStartDate: isoToSlashYMD(fromDate),
+    reportEndDate: isoToSlashYMD(toDate),
+  });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not request the FBA Returns report.');
+  if (resp.csrfMissing) throw new Error("Open Seller Central's FBA customer returns report page (Fulfilment Reports → FBA customer returns) in this tab, then try again.");
+  if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
+  const referenceId = resp.body?.reportReferenceId;
+  if (!referenceId) throw new Error('Report scheduling did not return a reference id.');
+  return referenceId;
+}
+
+async function fetchFbaReturnsReportStatus(tabId, referenceId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_FBA_RETURNS_STATUS', referenceId });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the FBA Returns report status.');
+  if (resp.csrfMissing) throw new Error("Open Seller Central's FBA customer returns report page (Fulfilment Reports → FBA customer returns) in this tab, then try again.");
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the report status.`);
+  return Array.isArray(resp.body) ? resp.body[0] : null;
+}
+
+let tickInFlightFbaReturns = false;
+async function fbaReturnsSyncTick() {
+  if (tickInFlightFbaReturns) return;
+  tickInFlightFbaReturns = true;
+  try {
+    const job = await getFbaReturnsJob();
+    if (!job) { await chrome.alarms.clear(FBA_RETURNS_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearFbaReturnsJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Requesting FBA Returns report...' }));
+      const referenceId = await scheduleFbaReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+      await setFbaReturnsJob({ ...job, phase: 'polling', referenceId });
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the FBA Returns report...' }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const status = await fetchFbaReturnsReportStatus(job.tabId, job.referenceId);
+      if (status === 'Done') {
+        await setFbaReturnsJob({ ...job, phase: 'downloading' });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (status && /FAIL|ERROR|CANCEL/i.test(status)) {
+        throw new Error(`FBA Returns report ${status.toLowerCase()}. Try again.`);
+      }
+      const waitedMs = Date.now() - job.startedAt;
+      if (waitedMs > 50 * 60 * 1000) {
+        throw new Error('The FBA Returns report did not finish generating within the expected time. Try again shortly.');
+      }
+      // still InQueue/InProgress
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the FBA Returns report...' }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv');
+      const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'FBA_Returns', kind: 'fbaReturns' }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearFbaReturnsJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'fba returns sync failed:', e?.message);
+    await clearFbaReturnsJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'FBA Returns sync failed.' }));
+  } finally {
+    tickInFlightFbaReturns = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === FBA_RETURNS_TICK_ALARM_NAME) {
+    fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message));
+  }
+});
+
+async function startFbaReturnsSync({ fromDate, toDate, zipName, tabId }) {
+  await setFbaReturnsJob({
+    phase: 'scheduling',
+    fromDate, toDate, zipName, tabId,
+    referenceId: null,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(FBA_RETURNS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await fbaReturnsSyncTick();
+}
+
+// ── Sponsored Ads Reports engine (Sponsored Products -> Search term) ───────
+// A completely different origin (advertising.amazon.in, not
+// sellercentral.amazon.in) and a completely different app from every engine
+// above - confirmed live through an extensive investigation (a static CSRF
+// string search failing twice, then a real breakpoint inside axios's own
+// adapter to trace the header back to base.ts's shared HTTP client). Closest
+// in shape to Orders/Payments: the create call hands back a real report id
+// directly (a bare UUID string, not wrapped in JSON), so this polls that one
+// id rather than snapshotting a list like Returns/GST have to.
+//
+// One real difference from every other engine: the "list" call that reports
+// status is a POST with a body (sort/filters/pagination), not a GET - and its
+// response's own latestProcessedReportSummary.urlString field hands back the
+// exact relative download path once status is "COMPLETED", so there's no
+// separate resolve step before downloading, unlike Orders/Payments/GST.
+//
+// Confirmed live: max lookback is 65 days for this specific report type
+// (Sponsored Products -> Search term), per the account's own reportMetadata
+// catalog - other report types have very different caps (Campaign: 2192
+// days, Purchased product: 60 days) but only Search term is in scope here.
+// The same 2-days-back generation-delay cutoff used elsewhere is applied by
+// direct instruction, not separately confirmed evidence of the same quirk on
+// this specific endpoint.
+
+async function scheduleAdsReport(tabId, { fromDate, toDate }) {
+  const startDate = new Date(`${fromDate}T00:00:00+05:30`).getTime();
+  const endDate = new Date(`${toDate}T23:59:59.999+05:30`).getTime();
+  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_ADS_REPORT', startDate, endDate });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not schedule the Ads report.');
+  if (resp.entityIdMissing) throw new Error("Open Seller Central's Advertising → Reports page (or the Amazon Ads console's Reports page) in this tab, then try again.");
+  if (resp.csrfMissing) throw new Error('Open the Ads Reports page in this tab, then try again.');
+  if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
+  if (!resp.reportId) throw new Error('Report scheduling did not return a report id.');
+  return resp.reportId;
+}
+
+async function fetchAdsSubscriptionsList(tabId) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_ADS_LIST' });
+  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the Ads report list.');
+  if (resp.entityIdMissing) throw new Error("Open Seller Central's Advertising → Reports page (or the Amazon Ads console's Reports page) in this tab, then try again.");
+  if (resp.csrfMissing) throw new Error('Open the Ads Reports page in this tab, then try again.');
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the Ads report list.`);
+  return resp.body?.subscriptions || [];
+}
+
+let tickInFlightAds = false;
+async function adsSyncTick() {
+  if (tickInFlightAds) return;
+  tickInFlightAds = true;
+  try {
+    const job = await getAdsJob();
+    if (!job) { await chrome.alarms.clear(ADS_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearAdsJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      await setProgress(newState({ current: 'Paused', paused: true }));
+      return;
+    }
+
+    if (job.phase === 'scheduling') {
+      await setProgress(newState({ current: 'Requesting Ads report...' }));
+      const reportId = await scheduleAdsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+      await setAdsJob({ ...job, phase: 'polling', reportId });
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Ads report...' }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const subscriptions = await fetchAdsSubscriptionsList(job.tabId);
+      const found = subscriptions.find((s) => s.id === job.reportId);
+      const summary = found?.latestProcessedReportSummary;
+      if (summary?.status === 'COMPLETED') {
+        if (!summary.urlString) {
+          await clearAdsJob();
+          await setProgress(newState({ finished: true, error: 'No data was found for that date range.' }));
+          return;
+        }
+        await setAdsJob({ ...job, phase: 'downloading', urlString: summary.urlString });
+        return; // next tick actually downloads - keeps every tick short
+      }
+      if (summary?.status && /FAIL|ERROR|CANCEL/i.test(summary.status)) {
+        throw new Error(`Ads report ${summary.status.toLowerCase()}. Try again.`);
+      }
+      const waitedMs = Date.now() - job.startedAt;
+      if (waitedMs > 50 * 60 * 1000) {
+        throw new Error('The Ads report did not finish generating within the expected time. Try again shortly.');
+      }
+      // still PENDING, or not found yet in the list
+      await setProgress(newState({ current: 'Waiting for Amazon to generate the Ads report...' }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const filename = buildAdsFilename(job.fromDate, job.toDate, '.xlsx');
+      const tasks = [{ urlString: job.urlString, filename, zipFolder: 'Ads', kind: 'ads' }];
+      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await clearAdsJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'ads sync failed:', e?.message);
+    await clearAdsJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'Ads sync failed.' }));
+  } finally {
+    tickInFlightAds = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ADS_TICK_ALARM_NAME) {
+    adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message));
+  }
+});
+
+async function startAdsSync({ fromDate, toDate, zipName, tabId }) {
+  await setAdsJob({
+    phase: 'scheduling',
+    fromDate, toDate, zipName, tabId,
+    reportId: null,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting sync...' }));
+  chrome.alarms.create(ADS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await adsSyncTick();
+}
+
+// ── Bulk sync engine (Orders + Payments + B2B/B2C in one pass) ─────────────
+// Modeled directly on how the Meesho extension's own bulk sync works: every
+// selected category's schedule/create call fires first (one pass through
+// the list), then every still-pending category is polled together on each
+// tick instead of finishing one completely before starting the next - a
+// slow category never blocks a fast one from finishing early - and once
+// every category has either succeeded or failed, everything that succeeded
+// gets bundled into exactly one ZIP via the same processDownloadQueue() used
+// by every individual-category engine above (it already accepts mixed
+// task.kind values, so no changes were needed there at all).
+//
+// Returns (both Standard and FBA) need the exact right Seller Central page
+// open in job.tabId (the CSRF hidden input/meta tag only exist there) - no
+// special detection was added for that though, since scheduleReturnsReport/
+// scheduleFbaReturnsReport already throw a clear, actionable error
+// ("Open ... page ... and try again") when it's missing, which the
+// try/catch below already turns into a per-category 'failed' entry same as
+// any other failure - the rest of the bulk run isn't affected.
+//
+// Ads is deliberately still left out of Bulk - it's a different origin
+// entirely (advertising.amazon.in, not sellercentral.amazon.in), so it
+// needs its own separately-resolved tab rather than sharing job.tabId,
+// which the current one-shared-tab design doesn't support yet.
+const BULK_CATEGORY_LABELS = { orders: 'Orders', payments: 'Payments', gst: 'B2B/B2C', returns: 'Returns', fbaReturns: 'FBA Returns' };
+function bulkStatusText(categories, sub) {
+  return categories.map((c) => {
+    const label = BULK_CATEGORY_LABELS[c];
+    const phase = sub[c]?.phase;
+    if (phase === 'ready') return `${label}: ready`;
+    if (phase === 'failed') return `${label}: failed`;
+    if (phase === 'scheduling') return `${label}: requesting...`;
+    return `${label}: waiting...`;
+  }).join('  ·  ');
+}
+
+let tickInFlightBulk = false;
+async function bulkSyncTick() {
+  if (tickInFlightBulk) return;
+  tickInFlightBulk = true;
+  try {
+    const job = await getBulkJob();
+    if (!job) { await chrome.alarms.clear(BULK_TICK_ALARM_NAME); return; }
+
+    if (job.cancelled) {
+      await clearBulkJob();
+      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
+      return;
+    }
+    if (job.paused) {
+      // Without `bulk` here, the popup falls back to showing the
+      // checkbox-selection grid instead of the frozen live-status view -
+      // this keeps the per-category dots visible (just no longer updating)
+      // while paused, instead of looking like the sync reset entirely.
+      await setProgress(newState({ current: 'Paused', paused: true, bulk: { categories: job.categories, sub: job.sub } }));
+      return;
+    }
+
+    const { categories } = job;
+    const sub = { ...job.sub };
+
+    if (job.phase === 'scheduling') {
+      for (const cat of categories) {
+        if (sub[cat].phase !== 'scheduling') continue;
+        try {
+          if (cat === 'orders') {
+            const referenceId = await scheduleOrderReport(job.tabId, { startDate: job.fromDate, endDate: job.toDate });
+            sub[cat] = { phase: 'polling', referenceId };
+          } else if (cat === 'payments') {
+            const reportId = await schedulePaymentsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+            sub[cat] = { phase: 'polling', reportId };
+          } else if (cat === 'gst') {
+            const before = await fetchGstReportList(job.tabId);
+            const beforeSet = matchingGstRecords(before, job.gstReportType).map((r) => r.dateRequested);
+            await scheduleGstReport(job.tabId, { reportType: job.gstReportType, fromDate: job.fromDate, toDate: job.toDate });
+            sub[cat] = { phase: 'polling', beforeSet };
+          } else if (cat === 'returns') {
+            const before = await fetchReturnsListRecords(job.tabId);
+            const beforeSet = matchingReturnsRecords(before, job.fromDate, job.toDate).map((r) => r.requestedOn);
+            await scheduleReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+            sub[cat] = { phase: 'polling', beforeSet };
+          } else if (cat === 'fbaReturns') {
+            const referenceId = await scheduleFbaReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+            sub[cat] = { phase: 'polling', referenceId };
+          }
+        } catch (e) {
+          sub[cat] = { phase: 'failed', error: e?.message || 'Could not request this report.' };
+        }
+      }
+      await setBulkJob({ ...job, sub, phase: 'polling' });
+      // `bulk` lets the popup render a live per-category status row (a
+      // colored dot/label per selected report type) instead of just one
+      // combined text line - it naturally stops appearing once the
+      // 'downloading' phase hands off to processDownloadQueue's own generic
+      // progress updates, which is the right moment for the popup to switch
+      // back to the normal shared progress bar anyway.
+      await setProgress(newState({ current: bulkStatusText(categories, sub), bulk: { categories, sub } }));
+      return;
+    }
+
+    if (job.phase === 'polling') {
+      const waitedMs = Date.now() - job.startedAt;
+      for (const cat of categories) {
+        if (sub[cat].phase !== 'polling') continue;
+        try {
+          if (cat === 'orders') {
+            const jobs = await fetchOrderStatusList(job.tabId);
+            const found = jobs.find((j) => j.referenceId === sub[cat].referenceId);
+            if (found?.stateReady) sub[cat] = { ...sub[cat], phase: 'ready' };
+            else if (found?.stateNoData) sub[cat] = { phase: 'failed', error: 'No orders were found for that date range.' };
+            else if (found?.requestStateName && /FAIL|ERROR/i.test(found.requestStateName)) sub[cat] = { phase: 'failed', error: found.requestStateName };
+          } else if (cat === 'payments') {
+            const status = await fetchPaymentsReportStatus(job.tabId, sub[cat].reportId);
+            if (status?.status === 'DOWNLOADABLE') sub[cat] = { ...sub[cat], phase: 'ready' };
+            else if (status?.status && /CANCEL|FAIL|ERROR/i.test(status.status)) sub[cat] = { phase: 'failed', error: `Payments report ${status.status.toLowerCase()}.` };
+          } else if (cat === 'gst') {
+            const records = await fetchGstReportList(job.tabId);
+            const candidates = matchingGstRecords(records, job.gstReportType).filter((r) => !sub[cat].beforeSet.includes(r.dateRequested));
+            if (candidates.length) {
+              const record = candidates[0];
+              if (record.reportStatus === 'Done') {
+                if (!record.reportDocumentId) sub[cat] = { phase: 'failed', error: 'No records were found for that date range.' };
+                else sub[cat] = { ...sub[cat], phase: 'ready', documentId: record.reportDocumentId, dateRangeCovered: (record.dateRangeCovered || []).join(' - ') };
+              } else if (record.reportStatus && /FAIL|ERROR/i.test(record.reportStatus)) {
+                sub[cat] = { phase: 'failed', error: `GST report ${record.reportStatus.toLowerCase()}.` };
+              }
+            }
+          } else if (cat === 'returns') {
+            const records = await fetchReturnsListRecords(job.tabId);
+            const candidates = matchingReturnsRecords(records, job.fromDate, job.toDate).filter((r) => !sub[cat].beforeSet.includes(r.requestedOn));
+            if (candidates.length) {
+              const record = candidates[0];
+              if (record.tsv.status === 'ready') sub[cat] = { ...sub[cat], phase: 'ready', tsvUrl: record.tsv.url };
+              else if (record.tsv.status === 'no_records') sub[cat] = { phase: 'failed', error: 'No returns were found for that date range.' };
+            }
+          } else if (cat === 'fbaReturns') {
+            const status = await fetchFbaReturnsReportStatus(job.tabId, sub[cat].referenceId);
+            if (status === 'Done') sub[cat] = { ...sub[cat], phase: 'ready' };
+            else if (status && /FAIL|ERROR|CANCEL/i.test(status)) sub[cat] = { phase: 'failed', error: `FBA Returns report ${status.toLowerCase()}.` };
+          }
+        } catch (e) {
+          sub[cat] = { phase: 'failed', error: e?.message || 'Could not read this report\'s status.' };
+        }
+        if (sub[cat].phase === 'polling' && waitedMs > 50 * 60 * 1000) {
+          sub[cat] = { phase: 'failed', error: 'Did not finish generating within the expected time.' };
+        }
+      }
+
+      const stillPolling = categories.some((c) => sub[c].phase === 'polling');
+      if (!stillPolling) {
+        await setBulkJob({ ...job, sub, phase: 'downloading' });
+        return;
+      }
+      await setBulkJob({ ...job, sub });
+      // `bulk` lets the popup render a live per-category status row (a
+      // colored dot/label per selected report type) instead of just one
+      // combined text line - it naturally stops appearing once the
+      // 'downloading' phase hands off to processDownloadQueue's own generic
+      // progress updates, which is the right moment for the popup to switch
+      // back to the normal shared progress bar anyway.
+      await setProgress(newState({ current: bulkStatusText(categories, sub), bulk: { categories, sub } }));
+      return;
+    }
+
+    if (job.phase === 'downloading') {
+      const tasks = [];
+      const failures = [];
+      for (const cat of categories) {
+        const s = sub[cat];
+        if (s.phase === 'ready') {
+          if (cat === 'orders') {
+            tasks.push({ referenceId: s.referenceId, filename: buildOrderFilename(job.fromDate, job.toDate, '.txt'), zipFolder: 'Orders' });
+          } else if (cat === 'payments') {
+            tasks.push({ reportId: s.reportId, filename: buildPaymentsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'Payments', kind: 'payments' });
+          } else if (cat === 'gst') {
+            tasks.push({
+              documentId: s.documentId, dateRangeCovered: s.dateRangeCovered, reportType: job.gstReportType,
+              filename: buildGstFilename(job.gstLabel, job.fromDate, job.toDate, '.csv'), zipFolder: `GST_${job.gstLabel}`, kind: 'gst',
+            });
+          } else if (cat === 'returns') {
+            tasks.push({ url: s.tsvUrl, filename: buildReturnsFilename(job.fromDate, job.toDate, '.tsv'), zipFolder: 'Returns', kind: 'returns' });
+          } else if (cat === 'fbaReturns') {
+            tasks.push({ referenceId: s.referenceId, filename: buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'FBA_Returns', kind: 'fbaReturns' });
+          }
+        } else if (s.phase === 'failed') {
+          failures.push({ label: BULK_CATEGORY_LABELS[cat], reason: s.error });
+        }
+      }
+
+      if (!tasks.length) {
+        await clearBulkJob();
+        const reason = failures.map((f) => `${f.label}: ${f.reason}`).join(' | ') || 'No report types were selected.';
+        await setProgress(newState({ finished: true, error: `No reports were generated. ${reason}` }));
+        return;
+      }
+
+      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      if (failures.length && !state.cancelled) {
+        state.failures = [...(state.failures || []), ...failures];
+        state.failed = (state.failed || 0) + failures.length;
+        await setProgress(state);
+      }
+      await clearBulkJob();
+      return;
+    }
+  } catch (e) {
+    console.warn(TAG, 'bulk sync failed:', e?.message);
+    await clearBulkJob();
+    await setProgress(newState({ finished: true, error: e?.message || 'Bulk sync failed.' }));
+  } finally {
+    tickInFlightBulk = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === BULK_TICK_ALARM_NAME) {
+    bulkSyncTick().catch((e) => console.error(TAG, 'bulk tick failed:', e?.message));
+  }
+});
+
+async function startBulkSync({ categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId }) {
+  const sub = {};
+  for (const cat of categories) sub[cat] = { phase: 'scheduling' };
+  await setBulkJob({
+    phase: 'scheduling',
+    categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId,
+    sub,
+    paused: false,
+    cancelled: false,
+    startedAt: Date.now(),
+  });
+  await setProgress(newState({ current: 'Starting bulk sync...' }));
+  chrome.alarms.create(BULK_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
+  await bulkSyncTick();
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'AUTH_LOGIN') {
+    (async () => {
+      try {
+        const user = await authLogin(msg.email, msg.password);
+        sendResponse({ ok: true, user });
+      } catch (e) {
+        console.warn(TAG, 'login failed:', e?.message);
+        sendResponse({ ok: false, error: e?.message || 'Login failed.' });
+      }
+    })();
+    return true; // keep the channel open for the async sendResponse above
+  }
+
+  if (msg?.type === 'AUTH_REFRESH_PROFILE') {
+    (async () => {
+      try {
+        const { auth } = await chrome.storage.local.get('auth');
+        if (!auth?.token) { sendResponse({ ok: false }); return; }
+        const user = await authFetchProfile(auth.token);
+        await chrome.storage.local.set({ auth: { ...auth, user } });
+        sendResponse({ ok: true, user });
+      } catch (e) {
+        // Never clear the stored token here - a transient network/profile
+        // error must not log the user out.
+        sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'PAUSE_SYNC') {
+    (async () => {
+      const oJob = await getOrderJob();
+      if (oJob) { await setOrderJob({ ...oJob, paused: true }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
+      const rJob = await getReturnsJob();
+      if (rJob) { await setReturnsJob({ ...rJob, paused: true }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
+      const pJob = await getPaymentsJob();
+      if (pJob) { await setPaymentsJob({ ...pJob, paused: true }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
+      const gJob = await getGstJob();
+      if (gJob) { await setGstJob({ ...gJob, paused: true }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
+      const fJob = await getFbaReturnsJob();
+      if (fJob) { await setFbaReturnsJob({ ...fJob, paused: true }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
+      const aJob = await getAdsJob();
+      if (aJob) { await setAdsJob({ ...aJob, paused: true }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
+      const bJob = await getBulkJob();
+      if (bJob) { await setBulkJob({ ...bJob, paused: true }); bulkSyncTick().catch((e) => console.error(TAG, 'bulk tick failed:', e?.message)); }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+  if (msg?.type === 'RESUME_SYNC') {
+    (async () => {
+      const oJob = await getOrderJob();
+      if (oJob) { await setOrderJob({ ...oJob, paused: false }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
+      const rJob = await getReturnsJob();
+      if (rJob) { await setReturnsJob({ ...rJob, paused: false }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
+      const pJob = await getPaymentsJob();
+      if (pJob) { await setPaymentsJob({ ...pJob, paused: false }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
+      const gJob = await getGstJob();
+      if (gJob) { await setGstJob({ ...gJob, paused: false }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
+      const fJob = await getFbaReturnsJob();
+      if (fJob) { await setFbaReturnsJob({ ...fJob, paused: false }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
+      const aJob = await getAdsJob();
+      if (aJob) { await setAdsJob({ ...aJob, paused: false }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
+      const bJob = await getBulkJob();
+      if (bJob) { await setBulkJob({ ...bJob, paused: false }); bulkSyncTick().catch((e) => console.error(TAG, 'bulk tick failed:', e?.message)); }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+  // Sent by the popup on a short timer (every few seconds) while it's open
+  // and a sync is active/unfinished. The alarm above is the reliable
+  // background safety net (keeps the sync going even if the popup is
+  // closed), but Chrome enforces a real floor around 1 minute on alarm
+  // periods regardless of what periodInMinutes asks for - which made status
+  // (e.g. "Done" in Amazon's own UI) sit stale in the popup for up to a
+  // minute at a time, only ever refreshing right away when Pause/Resume
+  // forced an immediate tick. This gives the popup that same immediate-tick
+  // path on its own timer, so watching the popup live is actually live,
+  // without weakening the alarm as the fallback for when it's closed.
+  if (msg?.type === 'POLL_NOW') {
+    (async () => {
+      const oJob = await getOrderJob();
+      if (oJob && !oJob.paused && !oJob.cancelled) orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message));
+      const rJob = await getReturnsJob();
+      if (rJob && !rJob.paused && !rJob.cancelled) returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message));
+      const pJob = await getPaymentsJob();
+      if (pJob && !pJob.paused && !pJob.cancelled) paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message));
+      const gJob = await getGstJob();
+      if (gJob && !gJob.paused && !gJob.cancelled) gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message));
+      const fJob = await getFbaReturnsJob();
+      if (fJob && !fJob.paused && !fJob.cancelled) fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message));
+      const aJob = await getAdsJob();
+      if (aJob && !aJob.paused && !aJob.cancelled) adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message));
+      const bJob = await getBulkJob();
+      if (bJob && !bJob.paused && !bJob.cancelled) bulkSyncTick().catch((e) => console.error(TAG, 'bulk tick failed:', e?.message));
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'CANCEL_SYNC') {
+    (async () => {
+      const oJob = await getOrderJob();
+      if (oJob) { await setOrderJob({ ...oJob, cancelled: true, paused: false }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
+      const rJob = await getReturnsJob();
+      if (rJob) { await setReturnsJob({ ...rJob, cancelled: true, paused: false }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
+      const pJob = await getPaymentsJob();
+      if (pJob) { await setPaymentsJob({ ...pJob, cancelled: true, paused: false }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
+      const gJob = await getGstJob();
+      if (gJob) { await setGstJob({ ...gJob, cancelled: true, paused: false }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
+      const fJob = await getFbaReturnsJob();
+      if (fJob) { await setFbaReturnsJob({ ...fJob, cancelled: true, paused: false }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
+      const aJob = await getAdsJob();
+      if (aJob) { await setAdsJob({ ...aJob, cancelled: true, paused: false }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
+      const bJob = await getBulkJob();
+      if (bJob) { await setBulkJob({ ...bJob, cancelled: true, paused: false }); bulkSyncTick().catch((e) => console.error(TAG, 'bulk tick failed:', e?.message)); }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'START_ORDER_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { fromDate, toDate, zipName } = msg;
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting order sync: ${fromDate} to ${toDate}`);
+        await startOrderSync({ fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_RETURNS_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { fromDate, toDate, zipName } = msg;
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting returns sync: ${fromDate} to ${toDate}`);
+        await startReturnsSync({ fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'returns sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_PAYMENTS_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { fromDate, toDate, zipName } = msg;
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting payments sync: ${fromDate} to ${toDate}`);
+        await startPaymentsSync({ fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'payments sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_GST_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { reportType, label, fromDate, toDate, zipName } = msg;
+        if (!reportType || !label) {
+          await setProgress(newState({ finished: true, error: 'Pick B2B or B2C first.' }));
+          return;
+        }
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting gst sync: ${label} ${fromDate} to ${toDate}`);
+        await startGstSync({ reportType, label, fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'gst sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_FBA_RETURNS_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { fromDate, toDate, zipName } = msg;
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting fba returns sync: ${fromDate} to ${toDate}`);
+        await startFbaReturnsSync({ fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'fba returns sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_ADS_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting sync...' }));
+
+        // A different origin from every other category - the Ads Reports
+        // page lives on advertising.amazon.in, not sellercentral.amazon.in.
+        const tabs = await chrome.tabs.query({ url: 'https://advertising.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open the Amazon Ads Reports page (advertising.amazon.in) first - via Seller Central → Reports → Advertising.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Ads Reports tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { fromDate, toDate, zipName } = msg;
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+
+        console.log(TAG, `starting ads sync: ${fromDate} to ${toDate}`);
+        await startAdsSync({ fromDate, toDate, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'ads sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'START_BULK_SYNC') {
+    (async () => {
+      try {
+        await setProgress(newState({ current: 'Starting bulk sync...' }));
+
+        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+        if (!tabs.length) {
+          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
+          return;
+        }
+        const tab = tabs.find((t) => t.active) || tabs[0];
+
+        if (!(await ensureContentScript(tab.id))) {
+          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
+          return;
+        }
+
+        const { categories, fromDate, toDate, gstReportType, gstLabel, zipName } = msg;
+        if (!Array.isArray(categories) || !categories.length) {
+          await setProgress(newState({ finished: true, error: 'Pick at least one report type first.' }));
+          return;
+        }
+        if (!fromDate || !toDate) {
+          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
+          return;
+        }
+        if (fromDate > toDate) {
+          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
+          return;
+        }
+        if (categories.includes('gst') && (!gstReportType || !gstLabel)) {
+          await setProgress(newState({ finished: true, error: 'Pick B2B or B2C first.' }));
+          return;
+        }
+
+        console.log(TAG, `starting bulk sync: ${categories.join(',')} ${fromDate} to ${toDate}`);
+        await startBulkSync({ categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId: tab.id });
+      } catch (e) {
+        console.warn(TAG, 'bulk sync failed to start:', e?.message);
+        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
+      }
+    })();
+    sendResponse({ ok: true });
+    return false;
+  }
+  return false;
+});

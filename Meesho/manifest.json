@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Meesho Data downloader by SpeedEcom",
+  "version": "1.2.0",
+  "description": "Bulk-download Meesho Supplier Orders, Payments, Returns and Claims for any date range as one ZIP, using your own logged-in session.",
+  "permissions": ["storage", "downloads", "declarativeNetRequest", "alarms", "scripting"],
+  "host_permissions": [
+    "https://supplier.meesho.com/*",
+    "https://storage.googleapis.com/*",
+    "https://ltl.sh/*",
+    "https://www.ltl.sh/*",
+    "https://speedecomsolution.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SpeedEcom Meesho Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://supplier.meesho.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

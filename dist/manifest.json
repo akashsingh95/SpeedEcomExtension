@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "Speed Ecom Extension",
+  "version": "1.0.0",
+  "description": "Bulk-download Amazon, Meesho and Myntra seller reports. Opens the right panel automatically for whichever marketplace you are on.",
+  "permissions": [
+    "alarms",
+    "declarativeNetRequest",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://advertising.amazon.in/*",
+    "https://analyticsfereportci.blob.core.windows.net/*",
+    "https://ltl.sh/*",
+    "https://partners.myntrainfo.com/*",
+    "https://partnersapi.myntrainfo.com/*",
+    "https://sellercentral.amazon.in/*",
+    "https://speedecomsolution.com/*",
+    "https://storage.googleapis.com/*",
+    "https://supplier.meesho.com/*",
+    "https://www.ltl.sh/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "chooser.html",
+    "default_title": "Speed Ecom",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://sellercentral.amazon.in/*",
+        "https://advertising.amazon.in/*"
+      ],
+      "js": [
+        "amazon_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://supplier.meesho.com/*"
+      ],
+      "js": [
+        "meesho_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://partners.myntrainfo.com/*"
+      ],
+      "js": [
+        "myntra_content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

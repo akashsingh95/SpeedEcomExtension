@@ -1,0 +1,725 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 360px;
+      background: #f6f7fb;
+      color: #16181d;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #1b2430 0%, #0f1420 60%, #131921 100%);
+      padding: 14px 18px;
+      color: #fff;
+      display: flex; align-items: center; gap: 10px;
+      position: relative;
+      overflow: hidden;
+    }
+    .header::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(120px 60px at 90% -10%, rgba(255,153,0,0.35), transparent 70%);
+      pointer-events: none;
+    }
+    .logo-icon { width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px; position: relative; z-index: 1; box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+    .brand-title { font-size: 13.5px; font-weight: 700; letter-spacing: -0.2px; position: relative; z-index: 1; }
+    .brand-sub { font-size: 9.5px; color: rgba(255,255,255,0.55); font-weight: 500; letter-spacing: 0.2px; position: relative; z-index: 1; }
+    .badge {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 5px;
+      background: linear-gradient(135deg, #FF9900 0%, #FF6A00 100%);
+      border-radius: 20px;
+      padding: 4px 10px;
+      font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+      color: #1a1200;
+      box-shadow: 0 2px 6px rgba(255,153,0,0.4);
+      position: relative; z-index: 1;
+    }
+    .badge-dot { width: 5px; height: 5px; background: #1a1200; border-radius: 50%; flex-shrink: 0; opacity: 0.55; }
+
+    /* ── User bar ── */
+    .user-bar {
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 18px; border-bottom: 1px solid #ecedf3;
+      background: #fff;
+    }
+    .user-avatar {
+      width: 27px; height: 27px; border-radius: 50%; flex-shrink: 0;
+      background: linear-gradient(135deg, #FF9900 0%, #E85D04 100%);
+      color: #fff; font-size: 11px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2px 6px rgba(232,93,4,0.3);
+    }
+    .user-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .user-name {
+      font-size: 12px; font-weight: 700; color: #16181d;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .user-email {
+      font-size: 10.5px; color: #9aa0ac;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .user-tenant {
+      font-size: 10.5px; font-weight: 700; color: #E85D04;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      display: none;
+    }
+    .logout-btn {
+      flex-shrink: 0; width: 26px; height: 26px;
+      border: none; border-radius: 7px; background: transparent;
+      color: #9aa0ac; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s, color 0.12s;
+    }
+    .logout-btn:hover { background: #fff1e0; color: #E85D04; }
+
+    /* ── Login view ── */
+    .login-view { padding: 26px 22px 20px; }
+    .login-hero { display: flex; flex-direction: column; align-items: center; margin-bottom: 18px; }
+    .login-hero-icon {
+      width: 46px; height: 46px; border-radius: 14px;
+      background: linear-gradient(135deg, #1b2430 0%, #131921 100%);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 6px 16px rgba(19,25,33,0.25);
+      margin-bottom: 10px;
+    }
+    .login-title { font-size: 15px; font-weight: 700; color: #16181d; margin-bottom: 3px; }
+    .login-intro { font-size: 11.5px; color: #8a8f9c; text-align: center; }
+    .login-field { position: relative; margin-bottom: 10px; }
+    .field-icon {
+      position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+      color: #b6bac4; pointer-events: none; display: flex;
+    }
+    .login-input {
+      width: 100%; padding: 10px 12px 10px 34px;
+      border: 1.5px solid #e5e7ef; border-radius: 9px;
+      font-size: 13px; font-family: inherit; color: #16181d; outline: none;
+      background: #fbfbfd;
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    .login-input:focus { border-color: #FF9900; background: #fff; box-shadow: 0 0 0 3px rgba(255,153,0,0.12); }
+    .login-field.password .login-input { padding-right: 36px; }
+    .pw-toggle {
+      position: absolute; top: 0; right: 0; bottom: 0;
+      width: 34px; border: none; background: transparent;
+      color: #b6bac4; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: color 0.12s;
+    }
+    .pw-toggle:hover { color: #E85D04; }
+    .pw-toggle .eye-off { display: none; }
+    .pw-toggle.showing .eye { display: none; }
+    .pw-toggle.showing .eye-off { display: block; }
+    .login-btn {
+      width: 100%; margin-top: 4px; padding: 10px 14px;
+      border: none; border-radius: 10px;
+      background: linear-gradient(135deg, #FFAC33 0%, #FF9900 45%, #E85D04 100%);
+      color: #1a1200; font-size: 13px; font-weight: 700; cursor: pointer;
+      box-shadow: 0 4px 12px rgba(255,153,0,0.35);
+      transition: transform 0.12s, box-shadow 0.12s, opacity 0.15s;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .login-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(255,153,0,0.45); }
+    .login-btn:active:not(:disabled) { transform: translateY(0); }
+    .login-btn:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
+    .login-error {
+      margin-top: 10px; padding: 8px 11px; border-radius: 8px;
+      background: #fef2f2; border: 1.5px solid #fecaca;
+      color: #991b1b; font-size: 12px; line-height: 1.4;
+      display: none;
+    }
+
+    /* ── Tabs - 3-col grid so 6 tabs wrap evenly into 2 rows instead of ── */
+    /* squeezing/overflowing a single flex row past the popup's fixed width */
+    .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 12px 18px 0; background: #fff; }
+    .tab-btn {
+      padding: 8px 4px; border: none; border-radius: 9px 9px 0 0;
+      background: transparent; color: #9aa0ac; font-size: 11.5px; font-weight: 700;
+      cursor: pointer; transition: color 0.12s, background 0.12s;
+      border-bottom: 2.5px solid transparent;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tab-btn:hover { color: #E85D04; }
+    .tab-btn.active { color: #E85D04; border-bottom-color: #FF9900; background: #fff8ee; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ── Main body ── */
+    .body { padding: 16px 18px; }
+    .card {
+      background: #fff; border: 1px solid #ecedf3; border-radius: 14px;
+      padding: 15px 15px 14px; box-shadow: 0 1px 3px rgba(16,24,40,0.04);
+    }
+    .card-title {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 12.5px; font-weight: 700; color: #16181d;
+      margin-bottom: 3px;
+    }
+    .card-title-icon {
+      width: 22px; height: 22px; border-radius: 7px;
+      background: linear-gradient(135deg, #FFD98A 0%, #FF9900 100%);
+      display: flex; align-items: center; justify-content: center; color: #1a1200;
+      flex-shrink: 0;
+    }
+    .card-sub { font-size: 10.5px; color: #9aa0ac; margin-bottom: 13px; line-height: 1.45; }
+
+    .field { margin-bottom: 11px; }
+    label { display: block; font-size: 10px; font-weight: 700; color: #8a8f9c; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+    input[type="text"], input[type="date"] {
+      width: 100%; padding: 8px 10px;
+      border: 1.5px solid #e5e7ef; border-radius: 8px;
+      font-size: 12.5px; font-family: inherit; color: #16181d; outline: none;
+      background: #fbfbfd;
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    input[type="text"]:focus, input[type="date"]:focus { border-color: #FF9900; background: #fff; box-shadow: 0 0 0 3px rgba(255,153,0,0.1); }
+    .date-range { display: flex; gap: 8px; align-items: center; }
+    .date-range > div { flex: 1; min-width: 0; }
+    .date-range .sep { color: #b6bac4; font-size: 10.5px; font-weight: 600; padding-top: 15px; flex: none; }
+
+    .radio-group { display: flex; gap: 16px; padding: 2px 0 3px; }
+    .radio-option {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12.5px; font-weight: 600; color: #16181d;
+      text-transform: none; letter-spacing: 0; cursor: pointer;
+    }
+    .radio-option input[type="radio"] { accent-color: #FF9900; width: 15px; height: 15px; cursor: pointer; }
+
+    .form-error {
+      font-size: 11px; color: #991b1b; margin-top: 7px; padding: 7px 10px;
+      background: #fef2f2; border: 1px solid #fecaca; border-radius: 7px;
+      display: none;
+    }
+
+    /* ── Bulk: report-type cards - compact 2-col grid, not long bars ── */
+    .bulk-ds-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    .ds-card {
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+      padding: 9px 4px 8px; border-radius: 11px; text-align: center;
+      border: 1.5px solid #e5e7ef; background: #fbfbfd;
+      cursor: pointer; position: relative;
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    .ds-card:hover { border-color: #FFC97A; }
+    .ds-card.checked { border-color: #FF9900; background: #fff8ee; box-shadow: 0 0 0 3px rgba(255,153,0,0.1); }
+    .ds-card.disabled { opacity: 0.45; cursor: default; }
+    .ds-card.disabled:hover { border-color: #e5e7ef; }
+    .ds-card input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+    .ds-icon {
+      width: 23px; height: 23px; border-radius: 7px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; color: #1a1200;
+      background: linear-gradient(135deg, #FFD98A 0%, #FF9900 100%);
+    }
+    .ds-label { font-size: 10.5px; font-weight: 700; color: #16181d; line-height: 1.2; }
+    .ds-box {
+      position: absolute; top: 5px; right: 5px;
+      width: 15px; height: 15px; border-radius: 5px; flex-shrink: 0;
+      border: 2px solid #d7dae2; background: #fff;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ds-card.checked .ds-box { background: linear-gradient(135deg, #FFAC33, #E85D04); border-color: transparent; }
+    .ds-box svg { opacity: 0; transform: scale(0.5); transition: opacity 0.12s, transform 0.12s; }
+    .ds-card.checked .ds-box svg { opacity: 1; transform: scale(1); }
+
+    /* ── Bulk: live per-category progress - same compact 2-col grid ── */
+    .bulk-live-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    .live-row {
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      padding: 10px 4px 9px; border-radius: 11px; text-align: center;
+      border: 1.5px solid #ecedf3; background: #fff;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .live-dot {
+      width: 15px; height: 15px; border-radius: 50%; flex-shrink: 0;
+      box-sizing: border-box; border: 2.5px solid transparent;
+    }
+    /* Waiting: a clearly-visible hollow ring (not a pale filled dot, which
+       was nearly invisible against the white row background) - reads as
+       "not started yet" rather than looking like no status at all. */
+    .live-dot.waiting { background: #fff; border-color: #98a1b0; }
+    /* In progress: a real spinning loader ring, not just a pulsing dot -
+       bold two-tone border so both the color and the rotation are obvious
+       at a glance, not just a subtle tint. */
+    .live-dot.progress {
+      background: transparent;
+      border-color: #ffcb70;
+      border-top-color: #E85D04;
+      border-right-color: #E85D04;
+      animation: liveSpin 0.7s linear infinite;
+    }
+    .live-dot.done { background: #16a34a; border-color: #16a34a; }
+    .live-dot.failed { background: #dc2626; border-color: #dc2626; }
+    @keyframes liveSpin {
+      to { transform: rotate(360deg); }
+    }
+    .live-row.done { border-color: #bbf0d1; background: #f2fbf6; }
+    .live-row.failed { border-color: #fecaca; background: #fef2f2; }
+    .live-label { font-size: 10.5px; font-weight: 700; color: #16181d; line-height: 1.2; }
+    .live-status { font-size: 9.5px; font-weight: 700; color: #9aa0ac; line-height: 1.2; }
+    .live-status.progress { color: #E85D04; }
+    .live-status.done { color: #15803d; }
+    .live-status.failed { color: #b91c1c; }
+
+    #sync, #syncReturns, #syncPayments, #syncGst, #syncAds, #syncBulk {
+      width: 100%; margin-top: 6px; padding: 10px 14px;
+      border: none; border-radius: 10px;
+      background: linear-gradient(135deg, #FFAC33 0%, #FF9900 45%, #E85D04 100%);
+      color: #1a1200; font-size: 13px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      box-shadow: 0 4px 12px rgba(255,153,0,0.3);
+      transition: transform 0.12s, box-shadow 0.12s, opacity 0.15s;
+    }
+    #sync:hover:not(:disabled), #syncReturns:hover:not(:disabled), #syncPayments:hover:not(:disabled), #syncGst:hover:not(:disabled), #syncAds:hover:not(:disabled), #syncBulk:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(255,153,0,0.4); }
+    #sync:disabled, #syncReturns:disabled, #syncPayments:disabled, #syncGst:disabled, #syncAds:disabled, #syncBulk:disabled { opacity: 0.5; cursor: default; box-shadow: none; transform: none; }
+
+    /* ── Progress ── */
+    .progress { margin-top: 14px; display: none; }
+    .progress.show { display: block; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .progress-card { background: #fff; border: 1px solid #ecedf3; border-radius: 14px; padding: 14px 15px; box-shadow: 0 1px 3px rgba(16,24,40,0.04); }
+    .progress-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .progress-count { font-size: 13px; font-weight: 700; color: #16181d; }
+    .progress-pct { font-size: 11px; font-weight: 700; color: #E85D04; }
+
+    .progress-track {
+      width: 100%; height: 8px; border-radius: 5px; background: #f0f1f6; overflow: hidden; position: relative;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 5px;
+      background: linear-gradient(90deg, #FFC24D, #FF9900, #E85D04);
+      width: 0%;
+      transition: width 0.35s ease;
+    }
+    .progress-fill.indeterminate {
+      width: 40% !important;
+      animation: indeterminate 1.3s ease-in-out infinite;
+    }
+    @keyframes indeterminate {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(250%); }
+    }
+    .progress-fill.success { background: linear-gradient(90deg, #34d399, #16a34a); }
+    .progress-fill.cancelled { background: linear-gradient(90deg, #d1d5db, #9ca3af); }
+    .progress-fill.failed { background: linear-gradient(90deg, #f87171, #dc2626); }
+
+    .progress-current { font-size: 11px; color: #8a8f9c; margin-top: 8px; word-break: break-all; }
+    .progress-failures { font-size: 11px; color: #b91c1c; margin-top: 6px; font-weight: 600; }
+    .progress-error { font-size: 12px; color: #991b1b; margin-top: 6px; line-height: 1.45; }
+    .progress-done { font-size: 12px; font-weight: 700; margin-top: 6px; display: flex; align-items: center; gap: 5px; }
+    .progress-done.ok { color: #15803d; }
+    .progress-done.cancel { color: #6b7280; }
+
+    .progress-actions { display: flex; gap: 7px; margin-top: 11px; }
+    .progress-actions button {
+      flex: 1; padding: 7px 8px; border-radius: 8px;
+      border: 1.5px solid #e5e7ef; background: #fff;
+      font-size: 11.5px; font-weight: 700; cursor: pointer; color: #374151;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .progress-actions button:hover { border-color: #FFC97A; background: #fff8ee; }
+    #cancelBtn { color: #b91c1c; border-color: #fecaca; }
+    #cancelBtn:hover { border-color: #f87171; background: #fef2f2; }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 8px 18px; border-top: 1px solid #ecedf3;
+      display: flex; align-items: center; justify-content: space-between;
+      background: #fff;
+    }
+    .footer-left { font-size: 9.5px; color: #b0b4bf; }
+    .footer-right a {
+      font-size: 9.5px; color: #E85D04; text-decoration: none;
+      font-weight: 700; opacity: 0.85; transition: opacity 0.1s;
+    }
+    .footer-right a:hover { opacity: 1; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icon.png" class="logo-icon" alt="SpeedEcom">
+    <div>
+      <div class="brand-title">Speed Ecom</div>
+      <div class="brand-sub">Marketplace Sync</div>
+    </div>
+    <span class="badge"><span class="badge-dot"></span>Amazon</span>
+  </div>
+
+  <div class="user-bar" id="userBar" style="display:none">
+    <span class="user-avatar" id="userAvatar"></span>
+    <div class="user-meta">
+      <span class="user-tenant" id="userTenant"></span>
+      <span class="user-name" id="userName"></span>
+      <span class="user-email" id="userEmail"></span>
+    </div>
+    <button class="logout-btn" id="logoutBtn" title="Log out" aria-label="Log out">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+    </button>
+  </div>
+
+  <div class="login-view" id="loginView">
+    <div class="login-hero">
+      <div class="login-hero-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF9900" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1.5" fill="#FF9900" stroke="none"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <div class="login-title">Sign in to Speed Ecom</div>
+      <div class="login-intro">Use your Speed Ecom account to unlock<br>Amazon order syncing</div>
+    </div>
+
+    <div class="login-field">
+      <span class="field-icon">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
+      </span>
+      <input class="login-input" type="text" id="loginEmail" placeholder="Email address" autocomplete="username">
+    </div>
+    <div class="login-field password">
+      <span class="field-icon">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </span>
+      <input class="login-input" type="password" id="loginPassword" placeholder="Password" autocomplete="current-password">
+      <button class="pw-toggle" id="pwToggle" type="button" title="Show password" aria-label="Show password">
+        <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61C3.35 8.36 1 12 1 12s4 8 11 8a9.26 9.26 0 0 0 5.39-1.61M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+
+    <button class="login-btn" id="loginBtn">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+      Login
+    </button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+
+  <div id="mainView" style="display:none">
+    <div class="tabs">
+      <button class="tab-btn active" id="tabOrdersBtn" type="button">Orders</button>
+      <button class="tab-btn" id="tabReturnsBtn" type="button">Returns</button>
+      <button class="tab-btn" id="tabPaymentsBtn" type="button">Payments</button>
+      <button class="tab-btn" id="tabGstBtn" type="button">B2B/B2C</button>
+      <button class="tab-btn" id="tabAdsBtn" type="button">Ads</button>
+      <button class="tab-btn" id="tabBulkBtn" type="button">Bulk</button>
+    </div>
+
+    <div class="body">
+      <div class="tab-panel active" id="ordersPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20.42 4.58a2 2 0 0 0-2.83 0L4.58 17.59a2 2 0 0 0-.58 1.41V21h2a2 2 0 0 0 1.41-.58L20.42 7.4a2 2 0 0 0 0-2.82Z"/></svg>
+            </span>
+            All Orders Report
+          </div>
+          <div class="card-sub">Pulls order data from Seller Central's All Orders → Order Date report and bundles it into one ZIP.</div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="fromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="toDate"></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="zipName" placeholder="Amazon_Orders">
+          </div>
+
+          <button id="sync">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync Orders
+          </button>
+          <div class="form-error" id="formError"></div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="returnsPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6"/><path d="M21 12A9 9 0 0 0 6 5.3L3 8"/><path d="M21 22v-6h-6"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/></svg>
+            </span>
+            <span id="returnsCardTitle">All Returns Report</span>
+          </div>
+          <div class="card-sub" id="returnsCardSub">Pulls TSV return data from Seller Central's Return Reports page and bundles it into one ZIP.</div>
+
+          <div class="field">
+            <label>Report Type</label>
+            <div class="radio-group">
+              <label class="radio-option"><input type="radio" name="returnsType" id="returnsTypeStandard" value="standard" checked> Standard Returns</label>
+              <label class="radio-option"><input type="radio" name="returnsType" id="returnsTypeFba" value="fba"> FBA Customer Returns</label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="returnsFromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="returnsToDate"></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="returnsZipName" placeholder="Amazon_Returns">
+          </div>
+
+          <button id="syncReturns">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync Returns
+          </button>
+          <div class="form-error" id="returnsFormError"></div>
+          <div class="card-sub" id="returnsHelpNote" style="margin:9px 0 0;">Needs the Return Reports page (Returns → Return Reports) open in this Seller Central tab.</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="paymentsPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+            </span>
+            Payments Transaction Report
+          </div>
+          <div class="card-sub">Pulls the Unified Transaction report from Seller Central's Payments Reports Repository and bundles it into one ZIP.</div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="paymentsFromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="paymentsToDate"></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="paymentsZipName" placeholder="Amazon_Payments">
+          </div>
+
+          <button id="syncPayments">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync Payments
+          </button>
+          <div class="form-error" id="paymentsFormError"></div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="gstPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12h6m-6 4h6M9 8h1"/><rect x="4" y="3" width="16" height="18" rx="2"/></svg>
+            </span>
+            GST On Demand Report (B2B/B2C)
+          </div>
+          <div class="card-sub">Pulls the Merchant Tax Report from Seller Central's GST On Demand Reports page and bundles it into one ZIP.</div>
+
+          <div class="field">
+            <label>Include Transactions</label>
+            <div class="radio-group">
+              <label class="radio-option"><input type="radio" name="gstType" id="gstTypeB2B" value="59300"> B2B</label>
+              <label class="radio-option"><input type="radio" name="gstType" id="gstTypeB2C" value="61200" checked> B2C</label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="gstFromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="gstToDate"></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="gstZipName" placeholder="Amazon_GST">
+          </div>
+
+          <button id="syncGst">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync B2B/B2C
+          </button>
+          <div class="form-error" id="gstFormError"></div>
+          <div class="card-sub" style="margin:9px 0 0;">You can request a report for any duration within the last 45 days.</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="adsPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a2 2 0 0 1-3.2 2.4L6 15"/></svg>
+            </span>
+            Sponsored Products Search Term Report
+          </div>
+          <div class="card-sub">Pulls the Search Term report from Amazon Ads' Reports page and bundles it into one ZIP.</div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="adsFromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="adsToDate"></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="adsZipName" placeholder="Amazon_Ads">
+          </div>
+
+          <button id="syncAds">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync Ads
+          </button>
+          <div class="form-error" id="adsFormError"></div>
+          <div class="card-sub" style="margin:9px 0 0;">Needs the Ads Reports page (Seller Central → Reports → Advertising) open in this tab.</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="bulkPanel">
+        <div class="card">
+          <div class="card-title">
+            <span class="card-title-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            </span>
+            Bulk Sync
+          </div>
+          <div class="card-sub">Pick one date range, choose which report types to include, and sync them all into a single ZIP.</div>
+
+          <div class="field">
+            <label>Date Range</label>
+            <div class="date-range">
+              <div><input type="date" id="bulkFromDate"></div>
+              <span class="sep">to</span>
+              <div><input type="date" id="bulkToDate"></div>
+            </div>
+          </div>
+
+          <div class="field" id="bulkSelectSection">
+            <label>Report Types</label>
+            <div class="bulk-ds-grid">
+              <label class="ds-card checked" id="bulkOrdersCard">
+                <input type="checkbox" id="bulkOrders" checked>
+                <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20.42 4.58a2 2 0 0 0-2.83 0L4.58 17.59a2 2 0 0 0-.58 1.41V21h2a2 2 0 0 0 1.41-.58L20.42 7.4a2 2 0 0 0 0-2.82Z"/></svg></span>
+                <span class="ds-label">Orders</span>
+              </label>
+              <label class="ds-card checked" id="bulkPaymentsCard">
+                <input type="checkbox" id="bulkPayments" checked>
+                <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg></span>
+                <span class="ds-label">Payments</span>
+              </label>
+              <label class="ds-card checked" id="bulkGstCard">
+                <input type="checkbox" id="bulkGst" checked>
+                <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12h6m-6 4h6M9 8h1"/><rect x="4" y="3" width="16" height="18" rx="2"/></svg></span>
+                <span class="ds-label">B2B/B2C</span>
+              </label>
+              <label class="ds-card checked" id="bulkReturnsCard">
+                <input type="checkbox" id="bulkReturns" checked>
+                <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6"/><path d="M21 12A9 9 0 0 0 6 5.3L3 8"/><path d="M21 22v-6h-6"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/></svg></span>
+                <span class="ds-label">Returns</span>
+              </label>
+            </div>
+            <div class="radio-group" id="bulkGstTypeRow" style="margin-top:7px;">
+              <label class="radio-option"><input type="radio" name="bulkGstType" id="bulkGstTypeB2B" value="59300"> B2B</label>
+              <label class="radio-option"><input type="radio" name="bulkGstType" id="bulkGstTypeB2C" value="61200" checked> B2C</label>
+            </div>
+            <div class="radio-group" id="bulkReturnsTypeRow" style="margin-top:7px;">
+              <label class="radio-option"><input type="radio" name="bulkReturnsType" id="bulkReturnsTypeStandard" value="standard" checked> Standard Returns</label>
+              <label class="radio-option"><input type="radio" name="bulkReturnsType" id="bulkReturnsTypeFba" value="fba"> FBA Customer Returns</label>
+            </div>
+            <div class="card-sub" id="bulkAvailabilityNote" style="margin:6px 0 0; display:none;"></div>
+          </div>
+
+          <div class="bulk-live-grid" id="bulkLiveGrid" style="display:none; margin-bottom:11px;">
+            <div class="live-row" id="bulkLiveOrders">
+              <span class="live-dot" id="bulkLiveOrdersDot"></span>
+              <span class="live-label">Orders</span>
+              <span class="live-status" id="bulkLiveOrdersStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="bulkLivePayments">
+              <span class="live-dot" id="bulkLivePaymentsDot"></span>
+              <span class="live-label">Payments</span>
+              <span class="live-status" id="bulkLivePaymentsStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="bulkLiveGst">
+              <span class="live-dot" id="bulkLiveGstDot"></span>
+              <span class="live-label">B2B/B2C</span>
+              <span class="live-status" id="bulkLiveGstStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="bulkLiveReturns">
+              <span class="live-dot" id="bulkLiveReturnsDot"></span>
+              <span class="live-label">Returns</span>
+              <span class="live-status" id="bulkLiveReturnsStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="bulkLiveFbaReturns">
+              <span class="live-dot" id="bulkLiveFbaReturnsDot"></span>
+              <span class="live-label">FBA Returns</span>
+              <span class="live-status" id="bulkLiveFbaReturnsStatus">Waiting</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Zip File Name</label>
+            <input type="text" id="bulkZipName" placeholder="Amazon_Bulk">
+          </div>
+
+          <button id="syncBulk">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            Sync Selected
+          </button>
+          <div class="form-error" id="bulkFormError"></div>
+        </div>
+      </div>
+
+      <div class="progress" id="progress">
+        <div class="progress-card">
+          <div class="progress-head">
+            <span class="progress-count" id="progressCount"></span>
+            <span class="progress-pct" id="progressPct"></span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+          <div class="progress-current" id="progressCurrent"></div>
+          <div class="progress-failures" id="progressFailures"></div>
+          <div class="progress-error" id="progressError"></div>
+          <div class="progress-done" id="progressDone"></div>
+
+          <div class="progress-actions" id="progressActions">
+            <button id="pauseResumeBtn" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+              <span id="pauseResumeLabel">Pause</span>
+            </button>
+            <button id="cancelBtn" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span class="footer-left">© <span id="footerYear"></span> Speed Ecom</span>
+    <span class="footer-right"><a href="https://speedecomsolution.com" target="_blank" rel="noopener">speedecomsolution.com ↗</a></span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

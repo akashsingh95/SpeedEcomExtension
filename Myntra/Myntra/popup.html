@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 320px;
+      background: #fff;
+      color: #111827;
+      font-size: 13px;
+    }
+    .header {
+      background: linear-gradient(135deg, #db2777 0%, #9d174d 100%);
+      padding: 8px 16px;
+      color: #fff;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .logo-icon { width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px; }
+    .brand-title { font-size: 13px; font-weight: 700; letter-spacing: -0.3px; }
+    .badge {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 20px;
+      padding: 3px 8px;
+      font-size: 9px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    }
+    .badge-dot { width: 4px; height: 4px; background: #4ade80; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── User bar (shown once signed in) ── */
+    .user-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 16px; border-bottom: 1px solid #f3f4f6;
+      background: #fdf2f8;
+    }
+    .user-avatar {
+      width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+      background: linear-gradient(135deg, #db2777 0%, #9d174d 100%);
+      color: #fff; font-size: 10.5px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .user-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .user-name {
+      font-size: 12px; font-weight: 700; color: #1f2937;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .user-email {
+      font-size: 10.5px; color: #9ca3af;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .logout-btn {
+      flex-shrink: 0; width: 24px; height: 24px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #9ca3af; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s, color 0.12s;
+    }
+    .logout-btn:hover { background: #fce7f3; color: #db2777; }
+
+    /* ── Login view ── */
+    .login-view { padding: 18px 16px 16px; }
+    .sec-label { font-size: 10.5px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+    .login-intro { font-size: 12px; color: #6b7280; margin-bottom: 12px; }
+    .login-input {
+      width: 100%; padding: 8px 10px; margin-bottom: 8px;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      font-size: 13px; font-family: inherit; color: #111827; outline: none;
+      transition: border-color 0.12s;
+    }
+    .login-input:focus { border-color: #db2777; }
+    .login-field { position: relative; margin-bottom: 8px; }
+    .login-field .login-input { padding-right: 34px; margin-bottom: 0; }
+    .pw-toggle {
+      position: absolute; top: 0; right: 0; bottom: 0;
+      width: 32px; border: none; background: transparent;
+      color: #9ca3af; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: color 0.12s;
+    }
+    .pw-toggle:hover { color: #db2777; }
+    .pw-toggle .eye-off { display: none; }
+    .pw-toggle.showing .eye { display: none; }
+    .pw-toggle.showing .eye-off { display: block; }
+    .login-btn {
+      width: 100%; margin-top: 4px; padding: 8px 14px;
+      border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #db2777 0%, #9d174d 100%);
+      color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+      box-shadow: 0 1px 6px rgba(219,39,119,0.3);
+      transition: opacity 0.15s;
+    }
+    .login-btn:hover:not(:disabled) { opacity: 0.92; }
+    .login-btn:disabled { opacity: 0.55; cursor: default; }
+    .login-error {
+      margin-top: 9px; padding: 6px 10px; border-radius: 7px;
+      background: #fef2f2; border: 1.5px solid #fecaca;
+      color: #991b1b; font-size: 12px; line-height: 1.4;
+    }
+
+    .body { padding: 14px 16px; }
+    .field { margin-bottom: 10px; }
+    label { display: block; font-size: 10.5px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+    input[type="text"], input[type="date"] {
+      width: 100%; padding: 7px 9px;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      font-size: 13px; font-family: inherit; color: #111827; outline: none;
+    }
+    input[type="text"]:focus, input[type="date"]:focus { border-color: #db2777; }
+    .date-range { display: flex; gap: 6px; align-items: center; }
+    .date-range span { color: #9ca3af; font-size: 11px; }
+    .types { display: flex; gap: 14px; }
+    .types label { display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 500; color: #374151; text-transform: none; letter-spacing: 0; }
+    .types input[type="checkbox"] { width: auto; margin: 0; }
+    .form-error { font-size: 11.5px; color: #991b1b; margin-top: 6px; display: none; }
+    #sync {
+      width: 100%; margin-top: 4px; padding: 8px 14px;
+      border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #db2777 0%, #9d174d 100%);
+      color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #sync:disabled { opacity: 0.5; cursor: default; }
+    .progress { margin-top: 12px; padding: 8px 10px; border-radius: 8px; background: #f9fafb; border: 1.5px solid #f3f4f6; display: none; }
+    .progress.show { display: block; }
+    .progress-count { font-size: 13px; font-weight: 700; color: #1f2937; }
+    .progress-current { font-size: 11.5px; color: #6b7280; margin-top: 2px; word-break: break-all; }
+    .progress-failures { font-size: 11.5px; color: #b91c1c; margin-top: 4px; }
+    .progress-error { font-size: 12px; color: #991b1b; margin-top: 4px; }
+    .progress-done { font-size: 12px; color: #166534; font-weight: 600; }
+    .progress-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .progress-actions button {
+      flex: 1; padding: 6px 8px; border-radius: 6px;
+      border: 1.5px solid #e5e7eb; background: #fff;
+      font-size: 12px; font-weight: 600; cursor: pointer; color: #374151;
+    }
+    .progress-actions button:hover { border-color: #c4b5fd; }
+    #cancelBtn { color: #b91c1c; border-color: #fecaca; }
+    #cancelBtn:hover { border-color: #f87171; background: #fef2f2; }
+
+    .footer {
+      padding: 4px 16px; border-top: 1px solid #f3f4f6;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .footer-left { font-size: 9.5px; color: #9ca3af; }
+    .footer-right a {
+      font-size: 9.5px; color: #db2777; text-decoration: none;
+      font-weight: 600; opacity: 0.8; transition: opacity 0.1s;
+    }
+    .footer-right a:hover { opacity: 1; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icon.png" class="logo-icon" alt="SpeedEcom">
+    <div class="brand-title">Speed Ecom</div>
+    <span class="badge"><span class="badge-dot"></span>Myntra</span>
+  </div>
+
+  <div class="user-bar" id="userBar" style="display:none">
+    <span class="user-avatar" id="userAvatar"></span>
+    <div class="user-meta">
+      <span class="user-name" id="userName"></span>
+      <span class="user-email" id="userEmail"></span>
+    </div>
+    <button class="logout-btn" id="logoutBtn" title="Log out" aria-label="Log out">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+        <polyline points="16 17 21 12 16 7"/>
+        <line x1="21" y1="12" x2="9" y2="12"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="login-view" id="loginView" style="display:none">
+    <div class="sec-label">Sign In</div>
+    <div class="login-intro">Sign in with your Speed Ecom account to use this extension.</div>
+    <input type="email" id="loginEmail" class="login-input" placeholder="Email" autocomplete="username" />
+    <div class="login-field">
+      <input type="password" id="loginPassword" class="login-input" placeholder="Password" autocomplete="current-password" />
+      <button type="button" id="pwToggle" class="pw-toggle" title="Show password" aria-label="Show password">
+        <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+          <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68"/>
+          <path d="M6.61 6.61A13.52 13.52 0 0 0 1 12s4 7 11 7a9.74 9.74 0 0 0 5.39-1.61"/>
+          <line x1="2" y1="2" x2="22" y2="22"/>
+        </svg>
+      </button>
+    </div>
+    <button id="loginBtn" class="login-btn">Login</button>
+    <div class="login-error" id="loginError" style="display:none"></div>
+  </div>
+
+  <div class="body" id="mainView" style="display:none">
+    <div class="field">
+      <label>Date range</label>
+      <div class="date-range">
+        <input type="date" id="fromDate" />
+        <span>to</span>
+        <input type="date" id="toDate" />
+      </div>
+    </div>
+    <div class="field">
+      <label>Payment type</label>
+      <div class="types">
+        <label><input type="checkbox" id="typePrepaid" checked /> Prepaid</label>
+        <label><input type="checkbox" id="typePostpaid" checked /> Postpaid</label>
+      </div>
+    </div>
+    <div class="field">
+      <label for="zipName">ZIP file name</label>
+      <input type="text" id="zipName" placeholder="Myntra_Payments" />
+    </div>
+    <button id="sync">Sync Payments</button>
+    <div class="form-error" id="formError"></div>
+
+    <div class="progress" id="progress">
+      <div class="progress-count" id="progressCount"></div>
+      <div class="progress-current" id="progressCurrent"></div>
+      <div class="progress-failures" id="progressFailures" style="display:none"></div>
+      <div class="progress-error" id="progressError" style="display:none"></div>
+      <div class="progress-done" id="progressDone" style="display:none"></div>
+      <div class="progress-actions" id="progressActions" style="display:none">
+        <button type="button" id="pauseResumeBtn">Pause</button>
+        <button type="button" id="cancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span class="footer-left">© <span id="footerYear">2026</span> Speed Ecom</span>
+    <span class="footer-right"><a href="https://speedecomsolution.com" target="_blank">speedecomsolution.com ↗</a></span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

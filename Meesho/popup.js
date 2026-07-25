@@ -1,0 +1,708 @@
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+
+const SVG = {
+  idle: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  busy: `<span class="spin"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>`,
+  ok:   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+  err:  `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
+  warn: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 17h.01"/></svg>`,
+};
+
+const HISTORY_ICON = {
+  clock: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>`,
+  close: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+};
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DOW = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+const MAX_OFFSET_DAYS = 31; // end date may be at most start + 31 days
+const MIN_YEAR = new Date().getFullYear() - 12; // earliest year offered in the dropdown
+
+// ── Date helpers (all local time, no timezone drift) ────────────────────────
+function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function parseYmd(s) {
+  const [y, m, d] = s.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  // Validate the date was created successfully
+  if (isNaN(date.getTime())) return null;
+  return date;
+}
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function diffDays(a, b) { return Math.round((startOfDay(b) - startOfDay(a)) / 86400000); }
+function fmt(d) { return `${String(d.getDate()).padStart(2, '0')} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`; }
+function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
+
+const TODAY = startOfDay(new Date());
+
+// ── State ───────────────────────────────────────────────────────────────────
+let startSel = null;  // Date | null
+let endSel = null;    // Date | null
+let view = { y: TODAY.getFullYear(), m: TODAY.getMonth() };
+let datasets = { orders: true, payments: true, returns: true, claims: true };
+let activeChip = null;
+let syncing = false;
+
+// ── Persistence ─────────────────────────────────────────────────────────────
+function persist() {
+  chrome.storage.local.set({
+    savedSel: { start: startSel ? ymd(startSel) : null, end: endSel ? ymd(endSel) : null, chip: activeChip },
+    savedDatasets: datasets,
+  });
+}
+
+// ── Calendar rendering ───────────────────────────────────────────────────────
+function isDisabled(day) {
+  if (day > TODAY) return true;                 // no future dates
+  if (startSel && !endSel) {                    // choosing the end date
+    if (day > addDays(startSel, MAX_OFFSET_DAYS)) return true; // beyond 31-day window
+  }
+  return false;
+}
+
+function cellClasses(day) {
+  const cls = ['cal-cell'];
+  if (sameDay(day, TODAY)) cls.push('today');
+  if (isDisabled(day)) cls.push('disabled');
+
+  const isStart = startSel && sameDay(day, startSel);
+  const isEnd = endSel && sameDay(day, endSel);
+  if (isStart) cls.push('start');
+  if (isEnd) cls.push('end');
+  if (startSel && endSel && day > startSel && day < endSel) cls.push('in-range');
+  return cls;
+}
+
+// Keep the view within [Jan MIN_YEAR .. current month of current year].
+function clampView() {
+  const curY = TODAY.getFullYear(), curM = TODAY.getMonth();
+  if (view.y > curY) { view.y = curY; view.m = Math.min(view.m, curM); }
+  else if (view.y === curY && view.m > curM) view.m = curM;
+  if (view.y < MIN_YEAR) { view.y = MIN_YEAR; view.m = 0; }
+}
+
+function buildHeaderSelects() {
+  const mSel = $('calMonth'), ySel = $('calYear');
+  if (mSel && mSel.options.length === 0) {
+    MONTHS.forEach((name, i) => {
+      const o = document.createElement('option');
+      o.value = String(i); o.textContent = name;
+      mSel.appendChild(o);
+    });
+  }
+  if (ySel && ySel.options.length === 0) {
+    for (let y = TODAY.getFullYear(); y >= MIN_YEAR; y--) {
+      const o = document.createElement('option');
+      o.value = String(y); o.textContent = String(y);
+      ySel.appendChild(o);
+    }
+  }
+}
+
+function syncHeaderSelects() {
+  const curY = TODAY.getFullYear(), curM = TODAY.getMonth();
+  const mSel = $('calMonth'), ySel = $('calYear');
+  if (!mSel || !ySel) return;
+  mSel.value = String(view.m);
+  ySel.value = String(view.y);
+  // grey out future months when the current year is shown
+  Array.from(mSel.options).forEach((o) => {
+    o.disabled = (view.y === curY && Number(o.value) > curM);
+  });
+}
+
+function renderCalendar() {
+  clampView();
+  syncHeaderSelects();
+
+  // Next-month button disabled when viewing the current (real) month — no future.
+  $('nextMonth').disabled = (view.y === TODAY.getFullYear() && view.m === TODAY.getMonth());
+
+  const grid = $('calGrid');
+  grid.innerHTML = '';
+
+  // weekday header
+  for (const d of DOW) {
+    const h = document.createElement('div');
+    h.className = 'cal-dow';
+    h.textContent = d;
+    grid.appendChild(h);
+  }
+
+  const firstDow = new Date(view.y, view.m, 1).getDay();
+  const total = daysInMonth(view.y, view.m);
+
+  for (let i = 0; i < firstDow; i++) {
+    const blank = document.createElement('div');
+    blank.className = 'cal-cell empty';
+    grid.appendChild(blank);
+  }
+
+  for (let day = 1; day <= total; day++) {
+    const d = new Date(view.y, view.m, day);
+    const cell = document.createElement('div');
+    cell.className = cellClasses(d).join(' ');
+    cell.textContent = String(day);
+    if (!isDisabled(d)) cell.dataset.date = ymd(d);
+    grid.appendChild(cell);
+  }
+
+  renderSummary();
+}
+
+function renderSummary() {
+  const pill = $('rangePill');
+  const days = $('rangeDays');
+
+  if (startSel && endSel) {
+    pill.textContent = `${fmt(startSel)} → ${fmt(endSel)}`;
+    pill.classList.remove('hint');
+    days.style.display = '';
+    days.textContent = `${diffDays(startSel, endSel) + 1}d`;
+  } else if (startSel) {
+    pill.textContent = `${fmt(startSel)} → pick an end date`;
+    pill.classList.add('hint');
+    days.style.display = 'none';
+  } else {
+    pill.textContent = 'Pick a start date · max 31 days';
+    pill.classList.add('hint');
+    days.style.display = 'none';
+  }
+
+  updateSyncEnabled();
+}
+
+function updateSyncEnabled() {
+  const hasRange = !!(startSel && endSel);
+  const hasDataset = Object.values(datasets).some(Boolean);
+  $('sync').disabled = !(hasRange && hasDataset);
+}
+
+// ── Validation ───────────────────────────────────────────────────────────────
+function isValidDate(d) {
+  return d instanceof Date && !isNaN(d.getTime());
+}
+
+// ── Selection ────────────────────────────────────────────────────────────────
+function onDayClick(day) {
+  if (syncing || isDisabled(day)) return;
+
+  if (!startSel || (startSel && endSel)) {
+    // start fresh
+    startSel = day;
+    endSel = null;
+  } else {
+    // start is set, choosing end
+    if (day < startSel) { startSel = day; endSel = null; }
+    else { endSel = day; }
+  }
+  activeChip = null;
+  setActiveChip(null);
+  persist();
+  renderCalendar();
+}
+
+function setSelection(start, end, chip) {
+  startSel = start;
+  endSel = end;
+  activeChip = chip || null;
+  view = { y: (end || start).getFullYear(), m: (end || start).getMonth() };
+  setActiveChip(activeChip);
+  persist();
+  renderCalendar();
+}
+
+// ── Quick-select chips ───────────────────────────────────────────────────────
+function setActiveChip(range) {
+  document.querySelectorAll('.chip').forEach((c) =>
+    c.classList.toggle('active', range && c.dataset.range === range)
+  );
+}
+
+const RANGES = {
+  thisMonth: () => {
+    const start = new Date(TODAY.getFullYear(), TODAY.getMonth(), 1);
+    return { start, end: TODAY };
+  },
+  lastMonth: () => {
+    const firstThis = new Date(TODAY.getFullYear(), TODAY.getMonth(), 1);
+    const end = addDays(firstThis, -1);                       // last day of prev month
+    const start = new Date(end.getFullYear(), end.getMonth(), 1);
+    return { start, end };
+  },
+  last30: () => {
+    const start = addDays(TODAY, -29); // 30 days inclusive
+    return { start, end: TODAY };
+  },
+};
+
+function applyRange(type) {
+  const r = RANGES[type] && RANGES[type]();
+  if (!r) return;
+  setSelection(r.start, r.end, type);
+}
+
+// If a hand-picked range happens to be exactly what a chip would produce, light
+// that chip up rather than leaving all three unhighlighted.
+function chipForRange(start, end) {
+  for (const [name, fn] of Object.entries(RANGES)) {
+    const r = fn();
+    if (sameDay(r.start, start) && sameDay(r.end, end)) return name;
+  }
+  return null;
+}
+
+// Picking a month (or year) from the calendar header selects that whole month,
+// instead of only moving the view and leaving you to click the 1st and the last
+// day yourself. The current month stops at today, since future dates are not
+// selectable.
+function selectWholeMonth(y, m) {
+  // Mirror clampView(): never land on a future month in the current year.
+  if (y === TODAY.getFullYear() && m > TODAY.getMonth()) m = TODAY.getMonth();
+  if (y < MIN_YEAR) { y = MIN_YEAR; m = 0; }
+
+  const start = new Date(y, m, 1);
+  let end = new Date(y, m + 1, 0); // day 0 of next month = last day of this one
+  if (end > TODAY) end = TODAY;
+  if (start > TODAY) { renderCalendar(); return; } // resync the header, change nothing
+
+  setSelection(start, end, chipForRange(start, end));
+}
+
+function setUIDisabled(disabled) {
+  syncing = disabled;
+  document.querySelectorAll('.chip, #sync, .cal-nav, .cal-select').forEach((el) => {
+    el.disabled = disabled;
+  });
+  document.querySelectorAll('.ds').forEach((el) => {
+    el.classList.toggle('disabled', disabled);
+  });
+  document.body.classList.toggle('syncing', disabled);
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+async function getAuth() {
+  try { const { auth } = await chrome.storage.local.get('auth'); return auth || null; } catch (_) { return null; }
+}
+
+function initials(name, email) {
+  const s = (name || email || '').trim();
+  if (!s) return '?';
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return s.slice(0, 2).toUpperCase();
+}
+
+function showUserBar(user) {
+  const name = user?.name || null;
+  const email = user?.email || null;
+  $('userAvatar').textContent = initials(name, email);
+  $('userName').textContent = name || email || 'Signed in';
+  $('userEmail').textContent = name && email ? email : '';
+  $('userBar').style.display = 'flex';
+}
+
+function showLoginView() {
+  $('loginView').style.display = 'block';
+  $('mainView').style.display = 'none';
+  $('userBar').style.display = 'none';
+}
+
+function showMainView() {
+  $('loginView').style.display = 'none';
+  $('mainView').style.display = 'block';
+}
+
+async function doLogin() {
+  const email = $('loginEmail').value.trim();
+  const password = $('loginPassword').value;
+  const err = $('loginError');
+  err.style.display = 'none';
+
+  if (!email || !password) {
+    err.textContent = 'Enter both email and password.';
+    err.style.display = 'block';
+    return;
+  }
+
+  $('loginBtn').disabled = true;
+  $('loginBtn').textContent = 'Signing in…';
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'AUTH_LOGIN', email, password });
+    if (resp?.ok) {
+      $('loginPassword').value = '';
+      showUserBar(resp.user || {});
+      showMainView();
+      initMainApp();
+    } else {
+      err.textContent = resp?.error || 'Login failed.';
+      err.style.display = 'block';
+    }
+  } catch (_) {
+    err.textContent = 'Could not reach the login server.';
+    err.style.display = 'block';
+  } finally {
+    $('loginBtn').disabled = false;
+    $('loginBtn').textContent = 'Login';
+  }
+}
+
+$('loginBtn').addEventListener('click', doLogin);
+$('loginPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+
+$('pwToggle').addEventListener('click', () => {
+  const input = $('loginPassword');
+  const btn = $('pwToggle');
+  const showing = input.type === 'password';
+  input.type = showing ? 'text' : 'password';
+  btn.classList.toggle('showing', showing);
+  btn.title = showing ? 'Hide password' : 'Show password';
+  btn.setAttribute('aria-label', btn.title);
+});
+
+async function doLogout() {
+  try { await chrome.storage.local.remove('auth'); } catch (_) {}
+  $('loginEmail').value = '';
+  $('loginPassword').value = '';
+  $('loginError').style.display = 'none';
+  showLoginView();
+}
+
+$('logoutBtn').addEventListener('click', doLogout);
+
+// ── Download history ─────────────────────────────────────────────────────────
+let historyPrevView = null; // 'login' | 'main' - where to return to on Close
+let historyTickInterval = null;
+let historyCache = [];
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function formatRemaining(ms) {
+  if (ms <= 0) return 'expired';
+  const totalSec = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return null;
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function renderHistoryList() {
+  const list = $('historyList');
+  const empty = $('historyEmpty');
+  const now = Date.now();
+  historyCache = historyCache.filter((e) => e.expiresAt > now);
+
+  if (!historyCache.length) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  list.innerHTML = historyCache.map((e) => {
+    const dr = e.dateRange || {};
+    const took = formatDuration(e.durationMs);
+    const meta = `${e.fileCount} file(s) • ${dr.min || '?'} → ${dr.max || '?'}${took ? ` • Took ${took}` : ''}`;
+    const missing = Array.isArray(e.failures) && e.failures.length
+      ? `<div class="history-item-warn">⚠ Missing: ${escapeHtml(e.failures.map((f) => f.label).join(', '))}</div>`
+      : '';
+    return `<div class="history-item">
+      <div class="history-item-main">
+        <div class="history-item-name">${escapeHtml(e.zipName || 'download.zip')}</div>
+        <div class="history-item-meta">${escapeHtml(meta)}</div>
+        ${missing}
+      </div>
+      <div class="history-item-side">
+        <span class="history-item-expiry">${formatRemaining(e.expiresAt - now)}</span>
+        <button type="button" class="history-item-download" data-id="${escapeHtml(e.id)}" title="Download again" aria-label="Download again">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function refreshHistory() {
+  let resp;
+  try { resp = await chrome.runtime.sendMessage({ type: 'GET_HISTORY' }); } catch (_) { resp = null; }
+  historyCache = Array.isArray(resp?.history) ? resp.history : [];
+  renderHistoryList();
+}
+
+function showHistoryActionMsg(text) {
+  const el = $('historyActionMsg');
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(showHistoryActionMsg._t);
+  showHistoryActionMsg._t = setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+$('historyList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.history-item-download');
+  if (!btn) return;
+  const entry = historyCache.find((e) => e.id === btn.dataset.id);
+  if (!entry) return;
+
+  btn.disabled = true;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'REDOWNLOAD_HISTORY_FILE', downloadId: entry.downloadId, zipName: entry.zipName });
+    if (!resp?.ok) showHistoryActionMsg(resp?.error || 'Could not download that file.');
+  } catch (_) {
+    showHistoryActionMsg('Could not reach the extension background.');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function setHistoryButtonIcon(isOpen) {
+  const btn = $('historyBtn');
+  btn.innerHTML = isOpen ? HISTORY_ICON.close : HISTORY_ICON.clock;
+  btn.title = isOpen ? 'Close history' : 'Download history';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+async function openHistory() {
+  historyPrevView = $('loginView').style.display !== 'none' ? 'login' : 'main';
+  $('historyActionMsg').style.display = 'none';
+  $('loginView').style.display = 'none';
+  $('mainView').style.display = 'none';
+  $('userBar').style.display = 'none';
+  $('historyView').style.display = 'block';
+  setHistoryButtonIcon(true);
+  await refreshHistory();
+  if (historyTickInterval) clearInterval(historyTickInterval);
+  historyTickInterval = setInterval(renderHistoryList, 1000);
+}
+
+function closeHistory() {
+  if (historyTickInterval) { clearInterval(historyTickInterval); historyTickInterval = null; }
+  $('historyView').style.display = 'none';
+  setHistoryButtonIcon(false);
+  if (historyPrevView === 'login') showLoginView();
+  else showMainView();
+}
+
+$('historyBtn').addEventListener('click', () => {
+  if ($('historyView').style.display === 'none') openHistory();
+  else closeHistory();
+});
+$('historyCloseBtn').addEventListener('click', closeHistory);
+
+$('historyClearBtn').addEventListener('click', async () => {
+  try { await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' }); } catch (_) {}
+  historyCache = [];
+  renderHistoryList();
+});
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+function applyStatus(state, msg) {
+  $('statusWrap').className = 'status-wrap' + (state !== 'idle' ? ' ' + state : '');
+  $('statusIcon').innerHTML = SVG[state] || SVG.idle;
+  $('status').textContent = msg;
+}
+
+function renderDatasets() {
+  document.querySelectorAll('.ds').forEach((el) => {
+    el.classList.toggle('on', !!datasets[el.dataset.ds]);
+  });
+  updateSyncEnabled();
+}
+
+async function initMainApp() {
+  buildHeaderSelects();
+  let saved = {};
+  try {
+    saved = await chrome.storage.local.get(['savedSel', 'savedDatasets', 'lastStatus']);
+  } catch (_) {}
+
+  if (saved.savedDatasets && typeof saved.savedDatasets === 'object') {
+    datasets = {
+      orders: !!saved.savedDatasets.orders,
+      payments: !!saved.savedDatasets.payments,
+      returns: !!saved.savedDatasets.returns,
+      claims: !!saved.savedDatasets.claims,
+    };
+  }
+  renderDatasets();
+
+  const s = saved.savedSel;
+  if (s && s.start) {
+    const st = parseYmd(s.start);
+    const en = s.end ? parseYmd(s.end) : null;
+    // Only restore if both dates are valid
+    if (st && en) {
+      setSelection(st, en, s.chip || null);
+    } else {
+      applyRange('lastMonth'); // fallback if dates are invalid
+    }
+  } else {
+    applyRange('lastMonth'); // sensible default on first open
+  }
+
+  if (saved.lastStatus && saved.lastStatus.ok === null) {
+    applyStatus('busy', saved.lastStatus.msg || 'Sync in progress…');
+    setUIDisabled(true);
+    lastProcessedStamp = null;
+  } else if (saved.lastStatus && saved.lastStatus.ok === 'warn') {
+    applyStatus('warn', saved.lastStatus.msg);
+    lastProcessedStamp = saved.lastStatus.at || null;
+  } else if (saved.lastStatus && saved.lastStatus.ok === true) {
+    applyStatus('ok', saved.lastStatus.msg);
+    lastProcessedStamp = saved.lastStatus.at || null;
+  } else if (saved.lastStatus && saved.lastStatus.ok === false) {
+    applyStatus('err', saved.lastStatus.msg);
+    lastProcessedStamp = saved.lastStatus.at || null;
+  } else {
+    applyStatus('idle', 'Ready to sync.');
+  }
+}
+
+$('footerYear').textContent = String(new Date().getFullYear());
+
+// ── Bootstrap: gate the whole app behind sign-in ────────────────────────────
+(async () => {
+  const auth = await getAuth();
+  if (!auth?.token) {
+    showLoginView();
+    return;
+  }
+
+  showUserBar(auth.user || {});
+  showMainView();
+  await initMainApp();
+
+  // Best-effort background refresh of the displayed profile. Failures here
+  // are silently ignored - they must never sign the user out.
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'AUTH_REFRESH_PROFILE' });
+    if (resp?.ok && resp.user) showUserBar(resp.user);
+  } catch (_) {}
+})();
+
+// ── Events ───────────────────────────────────────────────────────────────────
+$('calGrid').addEventListener('click', (e) => {
+  const cell = e.target.closest('.cal-cell');
+  if (!cell || !cell.dataset.date) return;
+  onDayClick(parseYmd(cell.dataset.date));
+});
+
+$('prevMonth').addEventListener('click', () => {
+  let { y, m } = view;
+  m -= 1; if (m < 0) { m = 11; y -= 1; }
+  view = { y, m };
+  renderCalendar();
+});
+
+$('nextMonth').addEventListener('click', () => {
+  if (view.y === TODAY.getFullYear() && view.m === TODAY.getMonth()) return;
+  let { y, m } = view;
+  m += 1; if (m > 11) { m = 0; y += 1; }
+  view = { y, m };
+  renderCalendar();
+});
+
+$('calMonth').addEventListener('change', () => {
+  selectWholeMonth(view.y, Number($('calMonth').value));
+});
+
+$('calYear').addEventListener('change', () => {
+  selectWholeMonth(Number($('calYear').value), view.m);
+});
+
+document.querySelectorAll('.chip').forEach((chip) => {
+  chip.addEventListener('click', () => applyRange(chip.dataset.range));
+});
+
+document.querySelectorAll('.ds').forEach((el) => {
+  el.addEventListener('click', () => {
+    if (syncing) return;
+    const key = el.dataset.ds;
+    datasets[key] = !datasets[key];
+    el.classList.toggle('on', datasets[key]);
+    persist();
+    updateSyncEnabled();
+  });
+});
+
+$('sync').addEventListener('click', () => {
+  if (!startSel || !endSel) { applyStatus('err', 'Please pick a start and end date.'); return; }
+  if (!isValidDate(startSel) || !isValidDate(endSel)) { applyStatus('err', 'Invalid date selection. Please reselect your dates.'); return; }
+  if (diffDays(startSel, endSel) > MAX_OFFSET_DAYS) { applyStatus('err', 'Range cannot be longer than 31 days.'); return; }
+  if (!Object.values(datasets).some(Boolean)) { applyStatus('err', 'Select at least one dataset.'); return; }
+
+  const min = ymd(startSel);
+  const max = ymd(endSel);
+  try { chrome.storage.local.remove('lastStatus'); } catch (_) {}
+  applyStatus('busy', 'Starting sync…');
+  setUIDisabled(true);
+  try {
+    const p = chrome.runtime.sendMessage({ type: 'SYNC_NOW', dateRange: { min, max }, datasets });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (_) {}
+});
+
+// ── Auto-clear success/error messages after a few seconds ────────────────────
+let clearTimer = null;
+let lastProcessedStamp = null;
+
+function scheduleClear(ms) {
+  if (clearTimer) clearTimeout(clearTimer);
+  clearTimer = setTimeout(async () => {
+    clearTimer = null;
+    try { await chrome.storage.local.remove('lastStatus'); } catch (_) {}
+    applyStatus('idle', 'Ready to sync.');
+  }, ms);
+}
+
+// ── Live status polling while a sync runs ────────────────────────────────────
+async function refresh() {
+  let lastStatus;
+  try { ({ lastStatus } = await chrome.storage.local.get('lastStatus')); } catch (_) { return; }
+
+  if (!lastStatus) {
+    if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+    if (syncing) setUIDisabled(false);
+    applyStatus('idle', 'Ready to sync.');
+    return;
+  }
+
+  if (lastStatus.at && lastStatus.at === lastProcessedStamp) return;
+  lastProcessedStamp = lastStatus.at || null;
+
+  if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+
+  if (lastStatus.ok === 'warn') {
+    applyStatus('warn', lastStatus.msg);
+    setUIDisabled(false);
+    scheduleClear(15000);
+  } else if (lastStatus.ok === true) {
+    applyStatus('ok', lastStatus.msg);
+    setUIDisabled(false);
+    scheduleClear(6000);
+  } else if (lastStatus.ok === false) {
+    applyStatus('err', lastStatus.msg);
+    setUIDisabled(false);
+    scheduleClear(12000);
+  } else {
+    applyStatus('busy', lastStatus.msg);
+    setUIDisabled(true);
+  }
+}
+setInterval(refresh, 1500);

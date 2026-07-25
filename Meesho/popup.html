@@ -1,0 +1,508 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body { overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 344px;
+      background: #fff;
+      color: #111827;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header (single row) ── */
+    .header {
+      background: linear-gradient(135deg, #5b21b6 0%, #4338ca 100%);
+      padding: 8px 16px;
+      color: #fff;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .logo-icon {
+      width: 24px; height: 24px; flex-shrink: 0;
+      border-radius: 6px;
+    }
+    .brand-title { font-size: 13px; font-weight: 700; letter-spacing: -0.3px; }
+    .badge {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 20px;
+      padding: 3px 8px;
+      font-size: 9px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    }
+    .badge-dot { width: 4px; height: 4px; background: #4ade80; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Body ── */
+    .body { padding: 8px 16px; }
+
+    .sec-label {
+      font-size: 10.5px; font-weight: 600;
+      color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: 5px;
+    }
+    .sec-label.mt { margin-top: 6px; }
+
+    /* ── Quick-select chips ── */
+    .chips {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .chip {
+      padding: 5px 4px;
+      font-size: 11.5px;
+      border-radius: 7px;
+      border: 1.5px solid #e5e7eb;
+      background: #fafafa;
+      font-weight: 500;
+      color: #6b7280; cursor: pointer;
+      text-align: center;
+      transition: border-color 0.13s, color 0.13s, background 0.13s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .chip:hover  { border-color: #a78bfa; color: #6d28d9; background: #faf5ff; }
+    .chip.active { border-color: #6d28d9; background: #f3e8ff; color: #5b21b6; font-weight: 600; }
+
+    /* ── Calendar ── */
+    .cal {
+      border: 1.5px solid #ececf1;
+      border-radius: 10px;
+      padding: 7px 8px 8px;
+      background: #fff;
+    }
+    .cal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 5px;
+    }
+    .cal-selects { display: flex; gap: 5px; align-items: center; }
+    .cal-select {
+      appearance: none; -webkit-appearance: none; -moz-appearance: none;
+      font-family: inherit; font-size: 12px; font-weight: 700; color: #1f2937;
+      background: #f6f5fb url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") no-repeat right 7px center;
+      border: 1.5px solid #ececf1; border-radius: 7px;
+      padding: 4px 21px 4px 9px; cursor: pointer; outline: none;
+      transition: border-color 0.12s, background-color 0.12s;
+    }
+    .cal-select:hover { border-color: #c4b5fd; }
+    .cal-select:focus { border-color: #6d28d9; }
+    .cal-select option:disabled { color: #d1d5db; }
+    .cal-nav {
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      background: #fff; color: #4b5563; cursor: pointer;
+      transition: border-color 0.12s, background 0.12s, color 0.12s, opacity 0.12s;
+    }
+    .cal-nav:hover:not(:disabled) { border-color: #a78bfa; color: #6d28d9; background: #faf5ff; }
+    .cal-nav:disabled { opacity: 0.32; cursor: default; }
+
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+    .cal-dow {
+      text-align: center; font-size: 9.5px; font-weight: 700;
+      color: #9ca3af; text-transform: uppercase; letter-spacing: 0.2px;
+      padding-bottom: 3px;
+    }
+    .cal-cell {
+      height: 22px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; color: #374151;
+      border-radius: 7px; cursor: pointer;
+      position: relative;
+      transition: background 0.1s, color 0.1s;
+      user-select: none;
+    }
+    .cal-cell.empty { cursor: default; }
+    .cal-cell.disabled { color: #d1d5db; cursor: default; }
+    .cal-cell:not(.disabled):not(.empty):not(.start):not(.end):hover { background: #f3e8ff; color: #5b21b6; }
+
+    .cal-cell.in-range { background: #f3e8ff; color: #5b21b6; border-radius: 0; }
+    .cal-cell.start, .cal-cell.end {
+      background: #6d28d9; color: #fff; font-weight: 700;
+      box-shadow: 0 1px 5px rgba(109,40,217,0.4);
+    }
+    .cal-cell.start { border-radius: 7px 2px 2px 7px; }
+    .cal-cell.end   { border-radius: 2px 7px 7px 2px; }
+    .cal-cell.start.end { border-radius: 7px; }
+    .cal-cell.today:not(.start):not(.end)::after {
+      content: ''; position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+      width: 4px; height: 4px; border-radius: 50%; background: #6d28d9;
+    }
+
+    /* range summary */
+    .range-line {
+      display: flex; align-items: center; gap: 7px;
+      margin-top: 4px;
+      font-size: 11.5px;
+    }
+    .range-pill {
+      flex: 1; min-width: 0;
+      background: #f9fafb; border: 1.5px solid #f1f1f4; border-radius: 7px;
+      padding: 5px 8px; font-weight: 600; color: #374151;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .range-pill.hint { color: #9ca3af; font-weight: 500; }
+    .range-days {
+      flex-shrink: 0; font-size: 10px; font-weight: 700; color: #6d28d9;
+      background: #f3e8ff; border-radius: 5px; padding: 3px 6px;
+    }
+
+    /* ── Dataset toggles ── */
+    .ds-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .ds {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      background: #fafafa; cursor: pointer;
+      transition: border-color 0.12s, background 0.12s;
+      user-select: none;
+    }
+    .ds:hover { border-color: #c4b5fd; background: #faf5ff; }
+    .ds.on { border-color: #6d28d9; background: #f6f0ff; }
+    .ds-box {
+      width: 14px; height: 14px; flex-shrink: 0;
+      border: 1.5px solid #cbd5e1; border-radius: 4px;
+      background: #fff;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .ds.on .ds-box { background: #6d28d9; border-color: #6d28d9; }
+    .ds-box svg { opacity: 0; transition: opacity 0.1s; }
+    .ds.on .ds-box svg { opacity: 1; }
+    .ds-label { font-size: 12px; font-weight: 600; color: #374151; }
+    .ds.on .ds-label { color: #5b21b6; }
+    .ds-tag {
+      margin-left: auto; font-size: 8px; font-weight: 700; letter-spacing: 0.2px;
+      color: #9ca3af; background: #eef0f3; border-radius: 4px; padding: 1px 4px;
+      text-transform: uppercase;
+    }
+    .ds.on .ds-tag { color: #6d28d9; background: #ede4ff; }
+
+    /* ── Sync button ── */
+    #sync {
+      width: 100%; margin-top: 6px; padding: 6px 14px;
+      border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #6d28d9 0%, #4338ca 100%);
+      color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      letter-spacing: 0.1px;
+      box-shadow: 0 1px 6px rgba(109,40,217,0.3);
+      transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+    }
+    #sync:hover:not(:disabled)  { opacity: 0.92; box-shadow: 0 2px 10px rgba(109,40,217,0.4); }
+    #sync:active:not(:disabled) { transform: scale(0.985); }
+    #sync:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+
+    /* ── Status ── */
+    .status-wrap {
+      margin-top: 6px; padding: 5px 10px; border-radius: 8px;
+      background: #f9fafb; border: 1.5px solid #f3f4f6;
+      display: flex; align-items: flex-start; gap: 8px;
+      min-height: 26px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .status-wrap.ok   { background: #f0fdf4; border-color: #bbf7d0; }
+    .status-wrap.err  { background: #fef2f2; border-color: #fecaca; }
+    .status-wrap.busy { background: #eff6ff; border-color: #bfdbfe; }
+    .status-wrap.warn { background: #fffbeb; border-color: #fde68a; }
+
+    .status-icon { flex-shrink: 0; padding-top: 1px; line-height: 0; }
+    .status-msg  { font-size: 12px; line-height: 1.4; word-break: break-word; color: #4b5563; }
+    .status-wrap.ok   .status-msg { color: #166534; }
+    .status-wrap.err  .status-msg { color: #991b1b; }
+    .status-wrap.busy .status-msg { color: #1e40af; }
+    .status-wrap.warn .status-msg { color: #92400e; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 0.75s linear infinite; display: inline-block; line-height: 0; }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 4px 16px; border-top: 1px solid #f3f4f6;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .footer-left { font-size: 9.5px; color: #9ca3af; }
+    .footer-right a {
+      font-size: 9.5px; color: #7c3aed; text-decoration: none;
+      font-weight: 600; opacity: 0.8; transition: opacity 0.1s;
+    }
+    .footer-right a:hover { opacity: 1; text-decoration: underline; }
+
+    body.syncing .cal-cell:not(.empty):not(.disabled):not(.start):not(.end):not(.in-range) { opacity: 0.4; cursor: default !important; }
+    body.syncing .cal-select, body.syncing .range-pill { opacity: 0.6; }
+    .ds.disabled { opacity: 0.5; cursor: default; pointer-events: none; }
+
+    /* ── User bar (shown once signed in) ── */
+    .user-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 16px; border-bottom: 1px solid #f3f4f6;
+      background: #faf8ff;
+    }
+    .user-avatar {
+      width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+      background: linear-gradient(135deg, #6d28d9 0%, #4338ca 100%);
+      color: #fff; font-size: 10.5px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .user-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .user-name {
+      font-size: 12px; font-weight: 700; color: #1f2937;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .user-email {
+      font-size: 10.5px; color: #9ca3af;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .logout-btn {
+      flex-shrink: 0; width: 24px; height: 24px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #9ca3af; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s, color 0.12s;
+    }
+    .logout-btn:hover { background: #ede4ff; color: #6d28d9; }
+
+    /* ── Login view ── */
+    .login-view { padding: 18px 16px 16px; }
+    .login-intro { font-size: 12px; color: #6b7280; margin-bottom: 12px; }
+    .login-input {
+      width: 100%; padding: 8px 10px; margin-bottom: 8px;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      font-size: 13px; font-family: inherit; color: #111827; outline: none;
+      transition: border-color 0.12s;
+    }
+    .login-input:focus { border-color: #6d28d9; }
+    .login-field { position: relative; margin-bottom: 8px; }
+    .login-field .login-input { padding-right: 34px; margin-bottom: 0; }
+    .pw-toggle {
+      position: absolute; top: 0; right: 0; bottom: 0;
+      width: 32px; border: none; background: transparent;
+      color: #9ca3af; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: color 0.12s;
+    }
+    .pw-toggle:hover { color: #6d28d9; }
+    .pw-toggle .eye-off { display: none; }
+    .pw-toggle.showing .eye { display: none; }
+    .pw-toggle.showing .eye-off { display: block; }
+    .login-btn {
+      width: 100%; margin-top: 4px; padding: 8px 14px;
+      border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #6d28d9 0%, #4338ca 100%);
+      color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+      box-shadow: 0 1px 6px rgba(109,40,217,0.3);
+      transition: opacity 0.15s;
+    }
+    .login-btn:hover:not(:disabled) { opacity: 0.92; }
+    .login-btn:disabled { opacity: 0.55; cursor: default; }
+    .login-error {
+      margin-top: 9px; padding: 6px 10px; border-radius: 7px;
+      background: #fef2f2; border: 1.5px solid #fecaca;
+      color: #991b1b; font-size: 12px; line-height: 1.4;
+    }
+
+    /* ── Header icon buttons (history, etc.) ── */
+    .header-icon-btn {
+      flex-shrink: 0; width: 24px; height: 24px;
+      border: none; border-radius: 6px;
+      background: rgba(255,255,255,0.12); color: #fff; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s;
+    }
+    .header-icon-btn:hover { background: rgba(255,255,255,0.22); }
+
+    /* ── Download history ── */
+    .history-view { padding: 14px 16px 16px; }
+    .history-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
+    .history-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 7px 9px; border-radius: 7px;
+      border: 1.5px solid #f1f1f4; background: #fafafa;
+    }
+    .history-item-main { min-width: 0; }
+    .history-item-name {
+      font-size: 11.5px; font-weight: 600; color: #374151;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .history-item-meta { font-size: 10px; color: #9ca3af; margin-top: 1px; }
+    .history-item-warn { font-size: 10px; color: #b45309; margin-top: 2px; }
+    .history-item-side { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+    .history-item-expiry {
+      font-size: 10px; font-weight: 700; color: #6d28d9;
+      background: #f3e8ff; border-radius: 5px; padding: 3px 6px; white-space: nowrap;
+    }
+    .history-item-download {
+      width: 22px; height: 22px; border-radius: 6px;
+      border: 1.5px solid #e5e7eb; background: #fff; color: #6d28d9;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .history-item-download:hover:not(:disabled) { border-color: #a78bfa; background: #faf5ff; }
+    .history-item-download:disabled { opacity: 0.5; cursor: default; }
+    .history-empty { font-size: 12px; color: #9ca3af; text-align: center; padding: 18px 0; }
+    .history-action-msg {
+      margin-top: 8px; padding: 6px 10px; border-radius: 7px;
+      background: #fef2f2; border: 1.5px solid #fecaca;
+      color: #991b1b; font-size: 11.5px; line-height: 1.4;
+    }
+    .history-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .secondary-btn {
+      flex: 1; padding: 8px 14px; border-radius: 8px;
+      border: 1.5px solid #e5e7eb; background: #fff; color: #374151;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: border-color 0.12s;
+    }
+    .secondary-btn:hover { border-color: #c4b5fd; }
+    #historyCloseBtn { flex: 1; margin-top: 0; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <img src="icon.png" class="logo-icon" alt="SpeedEcom">
+    <div class="brand-title">Speed Ecom</div>
+    <span class="badge"><span class="badge-dot"></span>Supplier Tool</span>
+    <button class="header-icon-btn" id="historyBtn" title="Download history" aria-label="Download history">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/>
+        <polyline points="12 7 12 12 15.5 14"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="history-view" id="historyView" style="display:none">
+    <div class="sec-label">Download History</div>
+    <div class="history-list" id="historyList"></div>
+    <div class="history-empty" id="historyEmpty" style="display:none">No recent downloads.</div>
+    <div class="history-action-msg" id="historyActionMsg" style="display:none"></div>
+    <div class="history-actions">
+      <button type="button" id="historyClearBtn" class="secondary-btn">Clear All</button>
+      <button type="button" id="historyCloseBtn" class="login-btn">Close</button>
+    </div>
+  </div>
+
+  <div class="user-bar" id="userBar" style="display:none">
+    <span class="user-avatar" id="userAvatar"></span>
+    <div class="user-meta">
+      <span class="user-name" id="userName"></span>
+      <span class="user-email" id="userEmail"></span>
+    </div>
+    <button class="logout-btn" id="logoutBtn" title="Log out" aria-label="Log out">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+        <polyline points="16 17 21 12 16 7"/>
+        <line x1="21" y1="12" x2="9" y2="12"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="login-view" id="loginView" style="display:none">
+    <div class="sec-label">Sign In</div>
+    <div class="login-intro">Sign in with your Speed Ecom account to use this extension.</div>
+    <input type="email" id="loginEmail" class="login-input" placeholder="Email" autocomplete="username" />
+    <div class="login-field">
+      <input type="password" id="loginPassword" class="login-input" placeholder="Password" autocomplete="current-password" />
+      <button type="button" id="pwToggle" class="pw-toggle" title="Show password" aria-label="Show password">
+        <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+          <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68"/>
+          <path d="M6.61 6.61A13.52 13.52 0 0 0 1 12s4 7 11 7a9.74 9.74 0 0 0 5.39-1.61"/>
+          <line x1="2" y1="2" x2="22" y2="22"/>
+        </svg>
+      </button>
+    </div>
+    <button id="loginBtn" class="login-btn">Login</button>
+    <div class="login-error" id="loginError" style="display:none"></div>
+  </div>
+
+  <div class="body" id="mainView" style="display:none">
+
+    <div class="sec-label">Quick Select</div>
+    <div class="chips">
+      <button class="chip" data-range="thisMonth">This Month</button>
+      <button class="chip active" data-range="lastMonth">Last Month</button>
+      <button class="chip" data-range="last30">Last 30 Days</button>
+    </div>
+
+    <div class="cal">
+      <div class="cal-head">
+        <button class="cal-nav" id="prevMonth" title="Previous month" aria-label="Previous month">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="cal-selects">
+          <select class="cal-select" id="calMonth" aria-label="Month"></select>
+          <select class="cal-select" id="calYear" aria-label="Year"></select>
+        </div>
+        <button class="cal-nav" id="nextMonth" title="Next month" aria-label="Next month">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+      <div class="cal-grid" id="calGrid"></div>
+    </div>
+
+    <div class="range-line">
+      <span class="range-pill hint" id="rangePill">Pick a start date · max 31 days</span>
+      <span class="range-days" id="rangeDays" style="display:none"></span>
+    </div>
+
+    <div class="sec-label mt">Data to Download</div>
+    <div class="ds-grid" id="dsGrid">
+      <div class="ds on" data-ds="orders">
+        <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        <span class="ds-label">Orders</span>
+      </div>
+      <div class="ds on" data-ds="payments">
+        <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        <span class="ds-label">Payments</span>
+      </div>
+      <div class="ds on" data-ds="returns">
+        <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        <span class="ds-label">Returns</span>
+        <span class="ds-tag">6 mo</span>
+      </div>
+      <div class="ds on" data-ds="claims">
+        <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        <span class="ds-label">Claims</span>
+        <span class="ds-tag">6 mo</span>
+      </div>
+    </div>
+
+    <button id="sync">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/>
+        <polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      Sync Now
+    </button>
+
+    <div id="statusWrap" class="status-wrap">
+      <span class="status-icon" id="statusIcon">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+      </span>
+      <span class="status-msg" id="status">Ready to sync.</span>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span class="footer-left">© <span id="footerYear">2025</span> Speed Ecom</span>
+    <span class="footer-right"><a href="https://speedecomsolution.com" target="_blank">speedecomsolution.com ↗</a></span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
