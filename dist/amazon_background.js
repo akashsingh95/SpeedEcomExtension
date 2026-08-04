@@ -12,10 +12,8 @@ const TAG = '[amazon-sync:bg]';
 const MAX_ATTEMPTS = 3;              // 1 initial try + 2 retries
 const LOG_MAX_ENTRIES = 200;
 const TICK_ALARM_NAME = 'amazon-order-sync-tick';
-const RETURNS_TICK_ALARM_NAME = 'amazon-returns-sync-tick';
 const PAYMENTS_TICK_ALARM_NAME = 'amazon-payments-sync-tick';
 const GST_TICK_ALARM_NAME = 'amazon-gst-sync-tick';
-const FBA_RETURNS_TICK_ALARM_NAME = 'amazon-fba-returns-sync-tick';
 const ADS_TICK_ALARM_NAME = 'amazon-ads-sync-tick';
 const BULK_TICK_ALARM_NAME = 'amazon-bulk-sync-tick';
 const TICK_INTERVAL_MINUTES = 0.5;   // Chrome's own alarm floor - matches the old 30s poll interval
@@ -143,8 +141,91 @@ async function authFetchProfile(token) {
   return extractUser(body);
 }
 
+// Toolbar-icon badge - lets a running/finished sync be noticed without
+// having the popup open at all. Badge text is stateful (unlike a popup),
+// so it deliberately stays as-is (✓ or !) after a sync finishes until the
+// popup is actually opened and acknowledges it (see the CLEAR_BADGE message,
+// sent right after initMainApp() clears a finished syncProgress) - clearing
+// it the instant the sync finishes would defeat the point of a passive
+// "something happened" signal.
+async function updateBadge(progress) {
+  try {
+    if (!progress || (!progress.active && !progress.finished)) {
+      await chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+    if (progress.finished) {
+      if (progress.error) {
+        await chrome.action.setBadgeText({ text: '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+      } else if (progress.cancelled) {
+        await chrome.action.setBadgeText({ text: '' });
+      } else {
+        await chrome.action.setBadgeText({ text: '✓' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#16a34a' });
+      }
+      return;
+    }
+    // Active: show a done/total count once downloading is actually under
+    // way (meaningful progress), otherwise a plain dot for the
+    // scheduling/waiting-for-Amazon phases where there's nothing to count yet.
+    const text = progress.total > 0 ? `${progress.done}/${progress.total}` : '•';
+    await chrome.action.setBadgeText({ text: String(text).slice(0, 4) });
+    await chrome.action.setBadgeBackgroundColor({ color: '#FF9900' });
+  } catch (_) {}
+}
+
+// Powers the popup's small "Last synced: ..." summary line - a single most-
+// recent-run record (not history), overwritten by whichever completion
+// point calls this next, regardless of which tab/engine it came from. Only
+// called for runs that actually produced at least one file - a total
+// failure isn't something worth remembering as "the last sync".
+async function recordLastSync(label, state) {
+  if (!state || state.cancelled || !(state.done > 0)) return;
+  try {
+    await chrome.storage.local.set({
+      lastSync: { label, done: state.done, total: state.total, failed: state.failed || 0, at: Date.now() },
+    });
+  } catch (_) {}
+}
+
+// Native OS notification the moment a sync actually finishes - each tick
+// engine only ever sets finished:true once per run (the job is cleared
+// immediately after, so no later tick can re-fire it), which is what makes
+// hooking this straight into setProgress safe without needing to track
+// "was this already notified" state separately. Most valuable for long Bulk
+// runs where the popup isn't sitting open the whole time, but fires either
+// way - a closed popup is exactly when this is the only signal available.
+async function notifySyncResult(progress) {
+  if (!progress?.finished || progress.cancelled) return;
+  try {
+    const id = `amazon-sync-${Date.now()}`;
+    if (progress.error) {
+      await chrome.notifications.create(id, {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Amazon sync failed',
+        message: progress.error,
+        priority: 1,
+      });
+    } else {
+      const doneText = progress.total > 0 ? `${progress.done} file${progress.done === 1 ? '' : 's'} downloaded` : 'Download complete';
+      const failText = progress.failed > 0 ? ` - ${progress.failed} failed` : '';
+      await chrome.notifications.create(id, {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Amazon sync complete',
+        message: `${doneText}${failText}`,
+        priority: 0,
+      });
+    }
+  } catch (_) {}
+}
+
 async function setProgress(progress) {
   try { await chrome.storage.local.set({ syncProgress: { ...progress, at: Date.now() } }); } catch (_) {}
+  await updateBadge(progress);
+  await notifySyncResult(progress);
 }
 
 function newState(overrides) {
@@ -203,18 +284,6 @@ async function clearOrderJob() {
   await chrome.alarms.clear(TICK_ALARM_NAME);
 }
 
-async function getReturnsJob() {
-  const { returnsJob } = await chrome.storage.local.get('returnsJob');
-  return returnsJob || null;
-}
-async function setReturnsJob(job) {
-  await chrome.storage.local.set({ returnsJob: job });
-}
-async function clearReturnsJob() {
-  await chrome.storage.local.remove('returnsJob');
-  await chrome.alarms.clear(RETURNS_TICK_ALARM_NAME);
-}
-
 async function getPaymentsJob() {
   const { paymentsJob } = await chrome.storage.local.get('paymentsJob');
   return paymentsJob || null;
@@ -237,18 +306,6 @@ async function setGstJob(job) {
 async function clearGstJob() {
   await chrome.storage.local.remove('gstJob');
   await chrome.alarms.clear(GST_TICK_ALARM_NAME);
-}
-
-async function getFbaReturnsJob() {
-  const { fbaReturnsJob } = await chrome.storage.local.get('fbaReturnsJob');
-  return fbaReturnsJob || null;
-}
-async function setFbaReturnsJob(job) {
-  await chrome.storage.local.set({ fbaReturnsJob: job });
-}
-async function clearFbaReturnsJob() {
-  await chrome.storage.local.remove('fbaReturnsJob');
-  await chrome.alarms.clear(FBA_RETURNS_TICK_ALARM_NAME);
 }
 
 async function getAdsJob() {
@@ -279,9 +336,13 @@ async function clearBulkJob() {
 // at a time - the popup disables all Sync buttons together while any one is
 // active. This resolves to whichever job actually exists, so
 // pause/cancel/download-queue logic doesn't need to know or care which
-// category (or bulk run) is currently active.
+// category (or bulk run) is currently active. Standard Returns/FBA Returns
+// no longer have their own separate job store - the individual Returns tab
+// now runs through the Bulk engine (getBulkJob) scoped to just those
+// categories, since that engine already generalizes to any subset and
+// already carries the navigation-orchestration those two need.
 async function getActiveJob() {
-  return (await getOrderJob()) || (await getReturnsJob()) || (await getPaymentsJob()) || (await getGstJob()) || (await getFbaReturnsJob()) || (await getAdsJob()) || (await getBulkJob());
+  return (await getOrderJob()) || (await getPaymentsJob()) || (await getGstJob()) || (await getAdsJob()) || (await getBulkJob());
 }
 
 // Every file here comes back through content.js's relay (base64-encoded) -
@@ -400,7 +461,11 @@ async function processDownloadQueue(tasks, zipBaseName, tabId) {
       state.done++;
     } else {
       state.failed++;
-      state.failures.push({ filename: task.filename, reason: result.error });
+      // task.cat (only set by bulkSyncTick/gstSyncTick, which know their own
+      // category/type keys) lets a "Retry failed only" button rebuild a
+      // scoped retry request straight from this failure list - undefined
+      // and harmless for every other single-purpose sync engine.
+      state.failures.push({ filename: task.filename, reason: result.error, cat: task.cat });
     }
     await setProgress(state);
   }
@@ -476,6 +541,155 @@ async function sendToTabWithRecovery(tabId, message) {
     if (!(await ensureContentScript(tabId))) throw e;
     return sendToTab(tabId, message);
   }
+}
+
+// ── Navigation orchestration (Bulk only) ────────────────────────────────────
+// Standard Returns and FBA Returns are two separate Seller Central pages
+// (different URLs), each with its own CSRF context that only exists once
+// that specific page has loaded - opening one does NOT initialize the other.
+// Every other module (Orders/Payments/GST) has no such requirement and
+// keeps working from whatever sellercentral tab is already open, unchanged.
+//
+// Report modules stay unaware of any of this - they still just take a tabId
+// and do schedule/poll/download. This registry plus the resolve/navigate
+// helpers below (used only from bulkSyncTick) are what decide *which* tabId
+// to hand them, opening/reusing/navigating a page on their behalf first.
+const PAGE_REQUIREMENTS = {
+  // Confirmed live (Return Reports page, screenshot) - the `ref=xx_...`
+  // suffix Amazon's own left-nav adds is just an analytics tracking param,
+  // not required for the page itself to load and initialize correctly.
+  returns: {
+    label: 'Standard Returns',
+    url: 'https://sellercentral.amazon.in/returns/report',
+    readyCheck: 'RETURNS_PAGE_READY',
+    neededFor: ['schedule'], // poll/download are CSRF-free - confirmed, no page needed for those
+  },
+  // No confirmed URL exists yet for this one (never captured - the account
+  // that built this originally isn't the one in use now). `url` starts null
+  // and is learned automatically the first time a call succeeds on whatever
+  // tab the user manually opened it in - see cachePageUrl below.
+  fbaReturns: {
+    label: 'FBA Customer Returns',
+    url: null,
+    readyCheck: 'FBA_RETURNS_PAGE_READY',
+    neededFor: ['schedule', 'poll'], // both need the page - confirmed, both throw csrfMissing
+  },
+};
+
+async function getCachedPageUrl(cat) {
+  const { pageUrlCache } = await chrome.storage.local.get('pageUrlCache');
+  return pageUrlCache?.[cat] || null;
+}
+async function cachePageUrl(cat, url) {
+  if (!url || !PAGE_REQUIREMENTS[cat]) return;
+  const { pageUrlCache } = await chrome.storage.local.get('pageUrlCache');
+  if (pageUrlCache?.[cat] === url) return;
+  await chrome.storage.local.set({ pageUrlCache: { ...(pageUrlCache || {}), [cat]: url } });
+}
+
+async function checkPageReady(tabId, requirement) {
+  try {
+    const resp = await chrome.tabs.sendMessage(tabId, { type: requirement.readyCheck });
+    return !!resp?.ready;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Covers the case where the user already has the right page open themselves
+// (in any tab) - reusing it means no navigation/new tab is needed at all.
+async function findReadyTabForRequirement(requirement) {
+  const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+  for (const tab of tabs) {
+    if (await checkPageReady(tab.id, requirement)) return tab.id;
+  }
+  return null;
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error('Timed out waiting for the page to load.')); }, timeoutMs);
+    function listener(id, info) {
+      if (id === tabId && info.status === 'complete') { cleanup(); resolve(); }
+    }
+    function cleanup() { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// Polls (rather than guessing a fixed delay) because page-initialization
+// time genuinely varies - this is the same content-script readiness signal
+// each module already reads its CSRF token from, just exposed as a boolean.
+async function pollPageReady(tabId, requirement, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await checkPageReady(tabId, requirement)) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+async function navigateAndPreparePage(tabId, requirement, url) {
+  await chrome.tabs.update(tabId, { url });
+  await waitForTabComplete(tabId);
+  if (!(await ensureContentScript(tabId))) throw new Error(`Could not connect to the ${requirement.label} page after opening it. Please try again.`);
+  const ready = await pollPageReady(tabId, requirement);
+  if (!ready) throw new Error(`Could not confirm the ${requirement.label} page finished initializing. Try again, or open it manually first.`);
+}
+
+// The single entry point bulkSyncTick calls before any page-bound call.
+// Returns the tabId to actually use for that call (which may be job.tabId
+// unchanged, an existing tab the user already has the right page open in,
+// or a shared temporary tab this function opens/navigates on the run's
+// behalf) - `job` is mutated in place with any nav-tab bookkeeping the
+// caller needs to persist, since this all has to survive an MV3 service
+// worker restart mid-run just like every other piece of job state here.
+async function resolvePageForCategory(job, cat, step) {
+  const requirement = PAGE_REQUIREMENTS[cat];
+  if (!requirement || !requirement.neededFor.includes(step)) return job.tabId;
+
+  // Already navigated to this exact requirement earlier in the same run -
+  // re-verify it's still ready rather than re-navigating for nothing.
+  if (job.navTabId && job.navTabFor === cat && (await checkPageReady(job.navTabId, requirement))) {
+    return job.navTabId;
+  }
+
+  const url = requirement.url || (await getCachedPageUrl(cat));
+  if (!url) {
+    // Nothing to navigate to yet - fall back to job.tabId, whose own
+    // csrfMissing error keeps asking the user to open the page manually,
+    // exactly as before. The moment they do, the schedule/poll call that
+    // follows reports pageUrl back and this becomes available from then on.
+    return job.tabId;
+  }
+
+  const existing = await findReadyTabForRequirement(requirement);
+  if (existing) {
+    await releaseNavTab(job); // a temp tab opened for a *previous* category is no longer needed
+    return existing;
+  }
+
+  if (!job.navTabId) {
+    const tab = await chrome.tabs.create({ url, active: false });
+    job.navTabId = tab.id;
+    job.navTabOwned = true;
+  } else {
+    await chrome.tabs.update(job.navTabId, { url });
+  }
+  job.navTabFor = cat;
+  await navigateAndPreparePage(job.navTabId, requirement, url);
+  return job.navTabId;
+}
+
+// Only closes tabs this run opened itself - a tab the user already had open
+// (found via findReadyTabForRequirement) is never touched.
+async function releaseNavTab(job) {
+  if (job.navTabId && job.navTabOwned) {
+    try { await chrome.tabs.remove(job.navTabId); } catch (_) {}
+  }
+  job.navTabId = null;
+  job.navTabOwned = false;
+  job.navTabFor = null;
 }
 
 function safeZipName(s) {
@@ -621,7 +835,8 @@ async function orderSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildOrderFilename(job.fromDate, job.toDate, '.txt');
       const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'Orders' }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await recordLastSync('Orders', state);
       await clearOrderJob();
       return;
     }
@@ -689,6 +904,7 @@ async function scheduleReturnsReport(tabId, { fromDate, toDate }) {
   if (!resp?.ok) throw new Error(resp?.error || 'Could not request the Returns report.');
   if (resp.csrfMissing) throw new Error("Open Seller Central's Return Reports page (Returns → Return Reports) in this tab, then try again.");
   if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
+  await cachePageUrl('returns', resp.pageUrl);
 }
 
 async function fetchReturnsListRecords(tabId) {
@@ -704,100 +920,12 @@ function matchingReturnsRecords(records, fromDate, toDate) {
   return records.filter((r) => r.type === 'All Returns' && r.dateRangeStart === start && r.dateRangeEnd === end);
 }
 
-let tickInFlightReturns = false;
-async function returnsSyncTick() {
-  if (tickInFlightReturns) return;
-  tickInFlightReturns = true;
-  try {
-    const job = await getReturnsJob();
-    if (!job) { await chrome.alarms.clear(RETURNS_TICK_ALARM_NAME); return; }
-
-    if (job.cancelled) {
-      await clearReturnsJob();
-      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
-      return;
-    }
-    if (job.paused) {
-      await setProgress(newState({ current: 'Paused', paused: true }));
-      return;
-    }
-
-    if (job.phase === 'scheduling') {
-      await setProgress(newState({ current: 'Checking existing Returns reports...' }));
-      const before = await fetchReturnsListRecords(job.tabId);
-      const beforeSet = matchingReturnsRecords(before, job.fromDate, job.toDate).map((r) => r.requestedOn);
-
-      await setProgress(newState({ current: 'Requesting Returns report...' }));
-      await scheduleReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
-
-      await setReturnsJob({ ...job, phase: 'polling', beforeSet });
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
-      return;
-    }
-
-    if (job.phase === 'polling') {
-      const records = await fetchReturnsListRecords(job.tabId);
-      const candidates = matchingReturnsRecords(records, job.fromDate, job.toDate)
-        .filter((r) => !job.beforeSet.includes(r.requestedOn));
-
-      if (!candidates.length) {
-        const waitedMs = Date.now() - job.startedAt;
-        if (waitedMs > 50 * 60 * 1000) {
-          throw new Error('The Returns report did not finish generating within the expected time. Try again shortly.');
-        }
-        await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
-        return;
-      }
-
-      const record = candidates[0];
-      if (record.tsv.status === 'ready') {
-        await setReturnsJob({ ...job, phase: 'downloading', tsvUrl: record.tsv.url });
-        return; // next tick actually downloads - keeps every tick short
-      }
-      if (record.tsv.status === 'no_records') {
-        await clearReturnsJob();
-        await setProgress(newState({ finished: true, error: 'No returns were found for that date range.' }));
-        return;
-      }
-      // still in_progress
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the Returns report...' }));
-      return;
-    }
-
-    if (job.phase === 'downloading') {
-      const filename = buildReturnsFilename(job.fromDate, job.toDate, '.tsv');
-      const tasks = [{ url: job.tsvUrl, filename, zipFolder: 'Returns', kind: 'returns' }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
-      await clearReturnsJob();
-      return;
-    }
-  } catch (e) {
-    console.warn(TAG, 'returns sync failed:', e?.message);
-    await clearReturnsJob();
-    await setProgress(newState({ finished: true, error: e?.message || 'Returns sync failed.' }));
-  } finally {
-    tickInFlightReturns = false;
-  }
-}
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RETURNS_TICK_ALARM_NAME) {
-    returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message));
-  }
-});
-
-async function startReturnsSync({ fromDate, toDate, zipName, tabId }) {
-  await setReturnsJob({
-    phase: 'scheduling',
-    fromDate, toDate, zipName, tabId,
-    paused: false,
-    cancelled: false,
-    startedAt: Date.now(),
-  });
-  await setProgress(newState({ current: 'Starting sync...' }));
-  chrome.alarms.create(RETURNS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
-  await returnsSyncTick();
-}
+// The individual Returns tab's own sync runs through the Bulk engine now
+// (see startBulkSync/bulkSyncTick below), scoped to categories drawn from
+// ['returns', 'fbaReturns'] - that engine already generalizes to any subset
+// of categories and already carries the navigation orchestration both of
+// these need, so a separate single-purpose tick/job/alarm here would just
+// be a second, divergent implementation of the exact same logic.
 
 // ── Payments report engine ──────────────────────────────────────────────────
 // Confirmed live: Account Type "All (Unified Reports)" -> Report Type
@@ -872,7 +1000,8 @@ async function paymentsSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildPaymentsFilename(job.fromDate, job.toDate, '.csv');
       const tasks = [{ reportId: job.reportId, filename, zipFolder: 'Payments', kind: 'payments' }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await recordLastSync('Payments', state);
       await clearPaymentsJob();
       return;
     }
@@ -920,6 +1049,14 @@ async function startPaymentsSync({ fromDate, toDate, zipName, tabId }) {
 //    dateRangeCovered (joined "start - end", exactly as displayed), and
 //    reportType - confirmed live via fetch/XHR/anchor-click interception,
 //    since create-report never returns a document id itself.
+//
+// B2B and B2C are just two different reportType values against the same
+// create/list endpoints - Amazon's report-history list already returns both
+// side by side, distinguished only by reportType. So both can be requested
+// in the same run: `types` holds whichever of ['B2B','B2C'] the user picked,
+// and `sub` tracks each one's own phase independently (scheduling loop
+// mirrors Bulk's per-category loop, just scoped to at most these two types).
+const GST_TYPE_REPORT_TYPE = { B2B: '59300', B2C: '61200' };
 
 async function scheduleGstReport(tabId, { reportType, fromDate, toDate }) {
   const startDate = new Date(`${fromDate}T00:00:00+05:30`).getTime();
@@ -940,6 +1077,83 @@ function matchingGstRecords(records, reportType) {
   return records.filter((r) => String(r.reportType) === String(reportType));
 }
 
+// ── GST Monthly Reports (auto-selected fallback for out-of-range dates) ────
+// GST On Demand only covers the last 45 days (Amazon's own limit). Per
+// direct instruction, this is picked automatically per whether the picked
+// range fits inside that window - never exposed as a separate choice in the
+// UI. Confirmed live: GST Monthly Reports live under this exact same
+// /fba/gstreports/* app, pre-generated by Amazon (available the 5th of the
+// following month) rather than scheduled on request, so there's no
+// create/poll step at all - monthly-metadata's own response already comes
+// back reportStatus:"Done" (or every field null if that month has no
+// report). reportType codes are Monthly's own, confirmed live MTR B2B =
+// 41200, MTR B2C = 39400 (different from On Demand's 59300/61200).
+const GST_MONTHLY_REPORT_TYPE = { B2B: '41200', B2C: '39400' };
+const GST_MONTHLY_LOOKBACK_DAYS = 45; // matches On Demand's own confirmed 45-day window
+const GST_MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+
+function gstMonthlyCutoffIso() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - (GST_MONTHLY_LOOKBACK_DAYS - 1));
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}`;
+}
+
+// Whole-range decision, not per-day - if any part of the picked range falls
+// outside the 45-day On Demand window, the entire range is handled via
+// Monthly instead (auto-split per whole calendar month it overlaps), per
+// direct instruction rather than trying to blend both sources for one run.
+function gstRangeNeedsMonthly(fromDate) {
+  return fromDate < gstMonthlyCutoffIso();
+}
+
+function gstMonthsInRange(fromDate, toDate) {
+  const start = new Date(`${fromDate}T00:00:00`);
+  const end = new Date(`${toDate}T00:00:00`);
+  const months = [];
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  while (cursor <= end) {
+    months.push({ month: GST_MONTH_NAMES[cursor.getMonth()], year: cursor.getFullYear() });
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+  return months;
+}
+
+async function fetchMonthlyGstMetadata(tabId, { reportType, month, year }) {
+  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_MONTHLY_GST_METADATA', reportType, month, year });
+  if (!resp?.ok) throw new Error(resp?.error || `Could not check the ${month} ${year} GST Monthly report.`);
+  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the ${month} ${year} GST Monthly report.`);
+  return resp.body || {};
+}
+
+// Resolves every whole month the range overlaps, synchronously (no polling
+// needed - these reports are already pre-generated or they simply don't
+// exist yet). A month with no report available is silently skipped rather
+// than failing the whole category - only if NONE of the months have a
+// report does this surface as a failure.
+async function resolveGstMonthlyDownloads(tabId, { label, fromDate, toDate }) {
+  const reportType = GST_MONTHLY_REPORT_TYPE[label];
+  const months = gstMonthsInRange(fromDate, toDate);
+  const downloads = [];
+  for (const { month, year } of months) {
+    const body = await fetchMonthlyGstMetadata(tabId, { reportType, month, year });
+    if (!body.documentId || body.reportStatus !== 'Done') continue;
+    downloads.push({ documentId: body.documentId, reportType, monthLabel: `${month}_${year}` });
+  }
+  return downloads;
+}
+
+function gstStatusText(types, sub) {
+  return types.map((t) => {
+    const phase = sub[t]?.phase;
+    if (phase === 'ready') return `${t}: ready`;
+    if (phase === 'empty') return `${t}: no data`;
+    if (phase === 'failed') return `${t}: failed`;
+    if (phase === 'scheduling') return `${t}: requesting...`;
+    return `${t}: waiting...`;
+  }).join('  ·  ');
+}
+
 let tickInFlightGst = false;
 async function gstSyncTick() {
   if (tickInFlightGst) return;
@@ -954,71 +1168,148 @@ async function gstSyncTick() {
       return;
     }
     if (job.paused) {
-      await setProgress(newState({ current: 'Paused', paused: true }));
+      await setProgress(newState({ current: 'Paused', paused: true, gst: { types: job.types, sub: job.sub } }));
       return;
     }
 
+    const { types } = job;
+    const sub = { ...job.sub };
+
     if (job.phase === 'scheduling') {
-      await setProgress(newState({ current: 'Checking existing GST reports...' }));
-      const before = await fetchGstReportList(job.tabId);
-      const beforeSet = matchingGstRecords(before, job.reportType).map((r) => r.dateRequested);
-
-      await setProgress(newState({ current: `Requesting GST ${job.label} report...` }));
-      await scheduleGstReport(job.tabId, { reportType: job.reportType, fromDate: job.fromDate, toDate: job.toDate });
-
-      await setGstJob({ ...job, phase: 'polling', beforeSet });
-      await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+      for (const t of types) {
+        if (sub[t].phase !== 'scheduling') continue;
+        try {
+          if (gstRangeNeedsMonthly(job.fromDate)) {
+            // Out of On Demand's 45-day window - resolved synchronously
+            // right here (Monthly reports are pre-generated, nothing to
+            // poll for), so this jumps straight to 'ready'/'failed',
+            // skipping the 'polling' phase entirely for this type.
+            const downloads = await resolveGstMonthlyDownloads(job.tabId, { label: t, fromDate: job.fromDate, toDate: job.toDate });
+            if (!downloads.length) sub[t] = { phase: 'empty', error: 'No GST Monthly reports were available for that date range.' };
+            else sub[t] = { phase: 'ready', downloads };
+          } else {
+            const reportType = GST_TYPE_REPORT_TYPE[t];
+            const before = await fetchGstReportList(job.tabId);
+            const beforeSet = matchingGstRecords(before, reportType).map((r) => r.dateRequested);
+            await scheduleGstReport(job.tabId, { reportType, fromDate: job.fromDate, toDate: job.toDate });
+            sub[t] = { phase: 'polling', beforeSet };
+          }
+        } catch (e) {
+          sub[t] = { phase: 'failed', error: e?.message || 'Could not request this report.' };
+        }
+      }
+      await setGstJob({ ...job, sub, phase: 'polling' });
+      await setProgress(newState({ current: gstStatusText(types, sub), gst: { types, sub } }));
       return;
     }
 
     if (job.phase === 'polling') {
-      const records = await fetchGstReportList(job.tabId);
-      const candidates = matchingGstRecords(records, job.reportType)
-        .filter((r) => !job.beforeSet.includes(r.dateRequested));
-
-      if (!candidates.length) {
-        const waitedMs = Date.now() - job.startedAt;
-        if (waitedMs > 50 * 60 * 1000) {
-          throw new Error('The GST report did not finish generating within the expected time. Try again shortly.');
+      const waitedMs = Date.now() - job.startedAt;
+      for (const t of types) {
+        if (sub[t].phase !== 'polling') continue;
+        try {
+          const reportType = GST_TYPE_REPORT_TYPE[t];
+          const records = await fetchGstReportList(job.tabId);
+          const candidates = matchingGstRecords(records, reportType).filter((r) => !sub[t].beforeSet.includes(r.dateRequested));
+          if (candidates.length) {
+            const record = candidates[0];
+            if (record.reportStatus === 'Done') {
+              if (!record.reportDocumentId) sub[t] = { phase: 'empty', error: 'No records were found for that date range.' };
+              else sub[t] = { ...sub[t], phase: 'ready', documentId: record.reportDocumentId, dateRangeCovered: (record.dateRangeCovered || []).join(' - ') };
+            } else if (record.reportStatus && /FAIL|ERROR/i.test(record.reportStatus)) {
+              sub[t] = { phase: 'failed', error: `GST report ${record.reportStatus.toLowerCase()}.` };
+            }
+          }
+        } catch (e) {
+          sub[t] = { phase: 'failed', error: e?.message || 'Could not read this report\'s status.' };
         }
-        await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+        if (sub[t].phase === 'polling' && waitedMs > 50 * 60 * 1000) {
+          sub[t] = { phase: 'failed', error: 'Did not finish generating within the expected time.' };
+        }
+      }
+
+      const stillPolling = types.some((t) => sub[t].phase === 'polling');
+      if (!stillPolling) {
+        await setGstJob({ ...job, sub, phase: 'downloading' });
         return;
       }
-
-      const record = candidates[0];
-      if (record.reportStatus === 'Done') {
-        if (!record.reportDocumentId) {
-          await clearGstJob();
-          await setProgress(newState({ finished: true, error: 'No records were found for that date range.' }));
-          return;
-        }
-        await setGstJob({
-          ...job,
-          phase: 'downloading',
-          documentId: record.reportDocumentId,
-          dateRangeCovered: (record.dateRangeCovered || []).join(' - '),
-        });
-        return; // next tick actually downloads - keeps every tick short
-      }
-      if (record.reportStatus && /FAIL|ERROR/i.test(record.reportStatus)) {
-        throw new Error(`GST report ${record.reportStatus.toLowerCase()}. Try again.`);
-      }
-      // still InQueue/InProgress
-      await setProgress(newState({ current: `Waiting for Amazon to generate the GST ${job.label} report...` }));
+      await setGstJob({ ...job, sub });
+      await setProgress(newState({ current: gstStatusText(types, sub), gst: { types, sub } }));
       return;
     }
 
     if (job.phase === 'downloading') {
-      const filename = buildGstFilename(job.label, job.fromDate, job.toDate, '.csv');
-      const tasks = [{
-        documentId: job.documentId,
-        dateRangeCovered: job.dateRangeCovered,
-        reportType: job.reportType,
-        filename,
-        zipFolder: `GST_${job.label}`,
-        kind: 'gst',
-      }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const tasks = [];
+      const failures = [];
+      const noData = [];
+      for (const t of types) {
+        const s = sub[t];
+        if (s.phase === 'ready' && s.downloads) {
+          // Monthly path - one task per whole month the range overlapped
+          // (already resolved with a real documentId each, in the
+          // scheduling phase above).
+          for (const d of s.downloads) {
+            tasks.push({
+              documentId: d.documentId,
+              reportType: d.reportType,
+              filename: `GST_${t}_${d.monthLabel}.csv`,
+              zipFolder: `GST_${t}`,
+              kind: 'gst',
+              cat: t,
+            });
+          }
+        } else if (s.phase === 'ready') {
+          tasks.push({
+            documentId: s.documentId,
+            dateRangeCovered: s.dateRangeCovered,
+            reportType: GST_TYPE_REPORT_TYPE[t],
+            filename: buildGstFilename(t, job.fromDate, job.toDate, '.csv'),
+            zipFolder: `GST_${t}`,
+            kind: 'gst',
+            cat: t,
+          });
+        } else if (s.phase === 'empty') {
+          // Confirmed no data for that range/type - not an error, so this
+          // is tracked separately from `failures` and never retried (there's
+          // nothing a retry would change).
+          noData.push({ cat: t, label: t, reason: s.error });
+        } else if (s.phase === 'failed') {
+          failures.push({ cat: t, label: t, reason: s.error });
+        }
+      }
+
+      if (!tasks.length) {
+        await clearGstJob();
+        const parts = [
+          ...failures.map((f) => `${f.label}: ${f.reason}`),
+          ...noData.map((f) => `${f.label}: no data for that range`),
+        ];
+        const reason = parts.join(' | ') || 'No report types were selected.';
+        const state = newState({ finished: true, error: `No reports were generated. ${reason}` });
+        if (failures.length) state.retry = { type: 'gst', types: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        await setProgress(state);
+        return;
+      }
+
+      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      if (failures.length && !state.cancelled) {
+        // `failures` here are types that never made it into `tasks` at all
+        // (failed during scheduling/polling, before processDownloadQueue
+        // ever counted them) - state.total only reflects tasks.length, so
+        // it has to grow along with state.failed or done+failed can exceed
+        // total (e.g. "Downloaded 5/5" with 1 extra failure showing 120%).
+        state.failures = [...(state.failures || []), ...failures];
+        state.failed = (state.failed || 0) + failures.length;
+        state.total = (state.total || 0) + failures.length;
+      }
+      if (!state.cancelled) {
+        const failedTypes = [...new Set((state.failures || []).map((f) => f.cat).filter(Boolean))];
+        if (failedTypes.length) {
+          state.retry = { type: 'gst', types: failedTypes, fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        }
+      }
+      await setProgress(state);
+      await recordLastSync(`GST ${types.join('/')}`, state);
       await clearGstJob();
       return;
     }
@@ -1037,10 +1328,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startGstSync({ reportType, label, fromDate, toDate, zipName, tabId }) {
+async function startGstSync({ types, fromDate, toDate, zipName, tabId }) {
+  const sub = {};
+  for (const t of types) sub[t] = { phase: 'scheduling' };
   await setGstJob({
     phase: 'scheduling',
-    reportType, label, fromDate, toDate, zipName, tabId,
+    types, fromDate, toDate, zipName, tabId,
+    sub,
     paused: false,
     cancelled: false,
     startedAt: Date.now(),
@@ -1073,6 +1367,7 @@ async function scheduleFbaReturnsReport(tabId, { fromDate, toDate }) {
   if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
   const referenceId = resp.body?.reportReferenceId;
   if (!referenceId) throw new Error('Report scheduling did not return a reference id.');
+  await cachePageUrl('fbaReturns', resp.pageUrl);
   return referenceId;
 }
 
@@ -1081,88 +1376,12 @@ async function fetchFbaReturnsReportStatus(tabId, referenceId) {
   if (!resp?.ok) throw new Error(resp?.error || 'Could not read the FBA Returns report status.');
   if (resp.csrfMissing) throw new Error("Open Seller Central's FBA customer returns report page (Fulfilment Reports → FBA customer returns) in this tab, then try again.");
   if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the report status.`);
+  await cachePageUrl('fbaReturns', resp.pageUrl);
   return Array.isArray(resp.body) ? resp.body[0] : null;
 }
 
-let tickInFlightFbaReturns = false;
-async function fbaReturnsSyncTick() {
-  if (tickInFlightFbaReturns) return;
-  tickInFlightFbaReturns = true;
-  try {
-    const job = await getFbaReturnsJob();
-    if (!job) { await chrome.alarms.clear(FBA_RETURNS_TICK_ALARM_NAME); return; }
-
-    if (job.cancelled) {
-      await clearFbaReturnsJob();
-      await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
-      return;
-    }
-    if (job.paused) {
-      await setProgress(newState({ current: 'Paused', paused: true }));
-      return;
-    }
-
-    if (job.phase === 'scheduling') {
-      await setProgress(newState({ current: 'Requesting FBA Returns report...' }));
-      const referenceId = await scheduleFbaReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
-      await setFbaReturnsJob({ ...job, phase: 'polling', referenceId });
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the FBA Returns report...' }));
-      return;
-    }
-
-    if (job.phase === 'polling') {
-      const status = await fetchFbaReturnsReportStatus(job.tabId, job.referenceId);
-      if (status === 'Done') {
-        await setFbaReturnsJob({ ...job, phase: 'downloading' });
-        return; // next tick actually downloads - keeps every tick short
-      }
-      if (status && /FAIL|ERROR|CANCEL/i.test(status)) {
-        throw new Error(`FBA Returns report ${status.toLowerCase()}. Try again.`);
-      }
-      const waitedMs = Date.now() - job.startedAt;
-      if (waitedMs > 50 * 60 * 1000) {
-        throw new Error('The FBA Returns report did not finish generating within the expected time. Try again shortly.');
-      }
-      // still InQueue/InProgress
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the FBA Returns report...' }));
-      return;
-    }
-
-    if (job.phase === 'downloading') {
-      const filename = buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv');
-      const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'FBA_Returns', kind: 'fbaReturns' }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
-      await clearFbaReturnsJob();
-      return;
-    }
-  } catch (e) {
-    console.warn(TAG, 'fba returns sync failed:', e?.message);
-    await clearFbaReturnsJob();
-    await setProgress(newState({ finished: true, error: e?.message || 'FBA Returns sync failed.' }));
-  } finally {
-    tickInFlightFbaReturns = false;
-  }
-}
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === FBA_RETURNS_TICK_ALARM_NAME) {
-    fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message));
-  }
-});
-
-async function startFbaReturnsSync({ fromDate, toDate, zipName, tabId }) {
-  await setFbaReturnsJob({
-    phase: 'scheduling',
-    fromDate, toDate, zipName, tabId,
-    referenceId: null,
-    paused: false,
-    cancelled: false,
-    startedAt: Date.now(),
-  });
-  await setProgress(newState({ current: 'Starting sync...' }));
-  chrome.alarms.create(FBA_RETURNS_TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
-  await fbaReturnsSyncTick();
-}
+// FBA Returns' own individual sync also runs through the Bulk engine now -
+// see the note above scheduleReturnsReport's now-removed standalone tick.
 
 // ── Sponsored Ads Reports engine (Sponsored Products -> Search term) ───────
 // A completely different origin (advertising.amazon.in, not
@@ -1263,7 +1482,8 @@ async function adsSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildAdsFilename(job.fromDate, job.toDate, '.xlsx');
       const tasks = [{ urlString: job.urlString, filename, zipFolder: 'Ads', kind: 'ads' }];
-      await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      await recordLastSync('Ads', state);
       await clearAdsJob();
       return;
     }
@@ -1308,23 +1528,36 @@ async function startAdsSync({ fromDate, toDate, zipName, tabId }) {
 // task.kind values, so no changes were needed there at all).
 //
 // Returns (both Standard and FBA) need the exact right Seller Central page
-// open in job.tabId (the CSRF hidden input/meta tag only exist there) - no
-// special detection was added for that though, since scheduleReturnsReport/
-// scheduleFbaReturnsReport already throw a clear, actionable error
-// ("Open ... page ... and try again") when it's missing, which the
-// try/catch below already turns into a per-category 'failed' entry same as
-// any other failure - the rest of the bulk run isn't affected.
+// open - the CSRF hidden input/meta tag only exist there, and Standard
+// Returns/FBA Returns are two separate pages that don't initialize each
+// other. Rather than requiring the *shared* job.tabId to already be on the
+// right page, resolvePageForCategory() (see "Navigation orchestration"
+// above sendToTabWithRecovery) resolves a tabId per page-bound category on
+// demand - reusing a tab the user already has it open in, or navigating one
+// dedicated temporary tab to it (sequentially, since only one page can be
+// displayed in a tab at a time) - and only falls back to job.tabId's own
+// clear "open this page and try again" error if no URL is known yet at all
+// (FBA Returns' page URL is learned automatically the first time that
+// happens, not hardcoded - see PAGE_REQUIREMENTS.fbaReturns). Every other
+// category (Orders/Payments/GST) has no page requirement and keeps using
+// job.tabId directly, unchanged.
 //
 // Ads is deliberately still left out of Bulk - it's a different origin
 // entirely (advertising.amazon.in, not sellercentral.amazon.in), so it
 // needs its own separately-resolved tab rather than sharing job.tabId,
 // which the current one-shared-tab design doesn't support yet.
-const BULK_CATEGORY_LABELS = { orders: 'Orders', payments: 'Payments', gst: 'B2B/B2C', returns: 'Returns', fbaReturns: 'FBA Returns' };
+const BULK_CATEGORY_LABELS = { orders: 'Orders', payments: 'Payments', gstB2B: 'GST B2B', gstB2C: 'GST B2C', returns: 'Returns', fbaReturns: 'FBA Returns' };
+// gstB2B/gstB2C are two independent categories rather than one 'gst' entry
+// with a radio choice - B2B and B2C are just two different reportType values
+// against the same create/list endpoints (see GST_TYPE_REPORT_TYPE above),
+// so both can run side by side exactly like Returns/FBA Returns already do.
+const BULK_GST_META = { gstB2B: { reportType: GST_TYPE_REPORT_TYPE.B2B, label: 'B2B' }, gstB2C: { reportType: GST_TYPE_REPORT_TYPE.B2C, label: 'B2C' } };
 function bulkStatusText(categories, sub) {
   return categories.map((c) => {
     const label = BULK_CATEGORY_LABELS[c];
     const phase = sub[c]?.phase;
     if (phase === 'ready') return `${label}: ready`;
+    if (phase === 'empty') return `${label}: no data`;
     if (phase === 'failed') return `${label}: failed`;
     if (phase === 'scheduling') return `${label}: requesting...`;
     return `${label}: waiting...`;
@@ -1335,11 +1568,13 @@ let tickInFlightBulk = false;
 async function bulkSyncTick() {
   if (tickInFlightBulk) return;
   tickInFlightBulk = true;
+  let job;
   try {
-    const job = await getBulkJob();
+    job = await getBulkJob();
     if (!job) { await chrome.alarms.clear(BULK_TICK_ALARM_NAME); return; }
 
     if (job.cancelled) {
+      await releaseNavTab(job);
       await clearBulkJob();
       await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
       return;
@@ -1366,18 +1601,31 @@ async function bulkSyncTick() {
           } else if (cat === 'payments') {
             const reportId = await schedulePaymentsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
             sub[cat] = { phase: 'polling', reportId };
-          } else if (cat === 'gst') {
-            const before = await fetchGstReportList(job.tabId);
-            const beforeSet = matchingGstRecords(before, job.gstReportType).map((r) => r.dateRequested);
-            await scheduleGstReport(job.tabId, { reportType: job.gstReportType, fromDate: job.fromDate, toDate: job.toDate });
-            sub[cat] = { phase: 'polling', beforeSet };
+          } else if (BULK_GST_META[cat]) {
+            const { reportType, label } = BULK_GST_META[cat];
+            if (gstRangeNeedsMonthly(job.fromDate)) {
+              // Out of On Demand's 45-day window - resolved synchronously
+              // right here (Monthly reports are pre-generated, nothing to
+              // poll for), so this jumps straight to 'ready'/'failed',
+              // skipping the 'polling' phase entirely for this category.
+              const downloads = await resolveGstMonthlyDownloads(job.tabId, { label, fromDate: job.fromDate, toDate: job.toDate });
+              if (!downloads.length) sub[cat] = { phase: 'empty', error: 'No GST Monthly reports were available for that date range.' };
+              else sub[cat] = { phase: 'ready', downloads };
+            } else {
+              const before = await fetchGstReportList(job.tabId);
+              const beforeSet = matchingGstRecords(before, reportType).map((r) => r.dateRequested);
+              await scheduleGstReport(job.tabId, { reportType, fromDate: job.fromDate, toDate: job.toDate });
+              sub[cat] = { phase: 'polling', beforeSet };
+            }
           } else if (cat === 'returns') {
-            const before = await fetchReturnsListRecords(job.tabId);
+            const returnsTabId = await resolvePageForCategory(job, cat, 'schedule');
+            const before = await fetchReturnsListRecords(returnsTabId);
             const beforeSet = matchingReturnsRecords(before, job.fromDate, job.toDate).map((r) => r.requestedOn);
-            await scheduleReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+            await scheduleReturnsReport(returnsTabId, { fromDate: job.fromDate, toDate: job.toDate });
             sub[cat] = { phase: 'polling', beforeSet };
           } else if (cat === 'fbaReturns') {
-            const referenceId = await scheduleFbaReturnsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+            const fbaTabId = await resolvePageForCategory(job, cat, 'schedule');
+            const referenceId = await scheduleFbaReturnsReport(fbaTabId, { fromDate: job.fromDate, toDate: job.toDate });
             sub[cat] = { phase: 'polling', referenceId };
           }
         } catch (e) {
@@ -1404,19 +1652,20 @@ async function bulkSyncTick() {
             const jobs = await fetchOrderStatusList(job.tabId);
             const found = jobs.find((j) => j.referenceId === sub[cat].referenceId);
             if (found?.stateReady) sub[cat] = { ...sub[cat], phase: 'ready' };
-            else if (found?.stateNoData) sub[cat] = { phase: 'failed', error: 'No orders were found for that date range.' };
+            else if (found?.stateNoData) sub[cat] = { phase: 'empty', error: 'No orders were found for that date range.' };
             else if (found?.requestStateName && /FAIL|ERROR/i.test(found.requestStateName)) sub[cat] = { phase: 'failed', error: found.requestStateName };
           } else if (cat === 'payments') {
             const status = await fetchPaymentsReportStatus(job.tabId, sub[cat].reportId);
             if (status?.status === 'DOWNLOADABLE') sub[cat] = { ...sub[cat], phase: 'ready' };
             else if (status?.status && /CANCEL|FAIL|ERROR/i.test(status.status)) sub[cat] = { phase: 'failed', error: `Payments report ${status.status.toLowerCase()}.` };
-          } else if (cat === 'gst') {
+          } else if (BULK_GST_META[cat]) {
+            const { reportType } = BULK_GST_META[cat];
             const records = await fetchGstReportList(job.tabId);
-            const candidates = matchingGstRecords(records, job.gstReportType).filter((r) => !sub[cat].beforeSet.includes(r.dateRequested));
+            const candidates = matchingGstRecords(records, reportType).filter((r) => !sub[cat].beforeSet.includes(r.dateRequested));
             if (candidates.length) {
               const record = candidates[0];
               if (record.reportStatus === 'Done') {
-                if (!record.reportDocumentId) sub[cat] = { phase: 'failed', error: 'No records were found for that date range.' };
+                if (!record.reportDocumentId) sub[cat] = { phase: 'empty', error: 'No records were found for that date range.' };
                 else sub[cat] = { ...sub[cat], phase: 'ready', documentId: record.reportDocumentId, dateRangeCovered: (record.dateRangeCovered || []).join(' - ') };
               } else if (record.reportStatus && /FAIL|ERROR/i.test(record.reportStatus)) {
                 sub[cat] = { phase: 'failed', error: `GST report ${record.reportStatus.toLowerCase()}.` };
@@ -1428,10 +1677,11 @@ async function bulkSyncTick() {
             if (candidates.length) {
               const record = candidates[0];
               if (record.tsv.status === 'ready') sub[cat] = { ...sub[cat], phase: 'ready', tsvUrl: record.tsv.url };
-              else if (record.tsv.status === 'no_records') sub[cat] = { phase: 'failed', error: 'No returns were found for that date range.' };
+              else if (record.tsv.status === 'no_records') sub[cat] = { phase: 'empty', error: 'No returns were found for that date range.' };
             }
           } else if (cat === 'fbaReturns') {
-            const status = await fetchFbaReturnsReportStatus(job.tabId, sub[cat].referenceId);
+            const fbaTabId = await resolvePageForCategory(job, cat, 'poll');
+            const status = await fetchFbaReturnsReportStatus(fbaTabId, sub[cat].referenceId);
             if (status === 'Done') sub[cat] = { ...sub[cat], phase: 'ready' };
             else if (status && /FAIL|ERROR|CANCEL/i.test(status)) sub[cat] = { phase: 'failed', error: `FBA Returns report ${status.toLowerCase()}.` };
           }
@@ -1445,6 +1695,10 @@ async function bulkSyncTick() {
 
       const stillPolling = categories.some((c) => sub[c].phase === 'polling');
       if (!stillPolling) {
+        // Nothing left that could still need a page-bound tab from here on -
+        // downloading needs no CSRF for any category, so release it now
+        // rather than leaving it open for the rest of the run.
+        await releaseNavTab(job);
         await setBulkJob({ ...job, sub, phase: 'downloading' });
         return;
       }
@@ -1462,46 +1716,86 @@ async function bulkSyncTick() {
     if (job.phase === 'downloading') {
       const tasks = [];
       const failures = [];
+      const noData = [];
       for (const cat of categories) {
         const s = sub[cat];
         if (s.phase === 'ready') {
           if (cat === 'orders') {
-            tasks.push({ referenceId: s.referenceId, filename: buildOrderFilename(job.fromDate, job.toDate, '.txt'), zipFolder: 'Orders' });
+            tasks.push({ referenceId: s.referenceId, filename: buildOrderFilename(job.fromDate, job.toDate, '.txt'), zipFolder: 'Orders', cat });
           } else if (cat === 'payments') {
-            tasks.push({ reportId: s.reportId, filename: buildPaymentsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'Payments', kind: 'payments' });
-          } else if (cat === 'gst') {
-            tasks.push({
-              documentId: s.documentId, dateRangeCovered: s.dateRangeCovered, reportType: job.gstReportType,
-              filename: buildGstFilename(job.gstLabel, job.fromDate, job.toDate, '.csv'), zipFolder: `GST_${job.gstLabel}`, kind: 'gst',
-            });
+            tasks.push({ reportId: s.reportId, filename: buildPaymentsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'Payments', kind: 'payments', cat });
+          } else if (BULK_GST_META[cat]) {
+            const { reportType, label } = BULK_GST_META[cat];
+            if (s.downloads) {
+              // Monthly path - one task per whole month the range
+              // overlapped (already resolved with a real documentId each,
+              // in the scheduling phase above).
+              for (const d of s.downloads) {
+                tasks.push({
+                  documentId: d.documentId, reportType: d.reportType,
+                  filename: `GST_${label}_${d.monthLabel}.csv`, zipFolder: `GST_${label}`, kind: 'gst', cat,
+                });
+              }
+            } else {
+              tasks.push({
+                documentId: s.documentId, dateRangeCovered: s.dateRangeCovered, reportType,
+                filename: buildGstFilename(label, job.fromDate, job.toDate, '.csv'), zipFolder: `GST_${label}`, kind: 'gst', cat,
+              });
+            }
           } else if (cat === 'returns') {
-            tasks.push({ url: s.tsvUrl, filename: buildReturnsFilename(job.fromDate, job.toDate, '.tsv'), zipFolder: 'Returns', kind: 'returns' });
+            tasks.push({ url: s.tsvUrl, filename: buildReturnsFilename(job.fromDate, job.toDate, '.tsv'), zipFolder: 'Returns', kind: 'returns', cat });
           } else if (cat === 'fbaReturns') {
-            tasks.push({ referenceId: s.referenceId, filename: buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'FBA_Returns', kind: 'fbaReturns' });
+            tasks.push({ referenceId: s.referenceId, filename: buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'FBA_Returns', kind: 'fbaReturns', cat });
           }
+        } else if (s.phase === 'empty') {
+          noData.push({ cat, label: BULK_CATEGORY_LABELS[cat], reason: s.error });
         } else if (s.phase === 'failed') {
-          failures.push({ label: BULK_CATEGORY_LABELS[cat], reason: s.error });
+          failures.push({ cat, label: BULK_CATEGORY_LABELS[cat], reason: s.error });
         }
       }
 
       if (!tasks.length) {
         await clearBulkJob();
-        const reason = failures.map((f) => `${f.label}: ${f.reason}`).join(' | ') || 'No report types were selected.';
-        await setProgress(newState({ finished: true, error: `No reports were generated. ${reason}` }));
+        const parts = [
+          ...failures.map((f) => `${f.label}: ${f.reason}`),
+          ...noData.map((f) => `${f.label}: no data for that range`),
+        ];
+        const reason = parts.join(' | ') || 'No report types were selected.';
+        const state = newState({ finished: true, error: `No reports were generated. ${reason}` });
+        if (failures.length) state.retry = { type: 'bulk', categories: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        await setProgress(state);
         return;
       }
 
       const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
       if (failures.length && !state.cancelled) {
+        // `failures` here are categories that never made it into `tasks` at
+        // all (failed during scheduling/polling, before processDownloadQueue
+        // ever counted them) - state.total only reflects tasks.length, so it
+        // has to grow along with state.failed or done+failed can exceed
+        // total (e.g. "Downloaded 5/5" with 1 extra failure showing 120%).
         state.failures = [...(state.failures || []), ...failures];
         state.failed = (state.failed || 0) + failures.length;
-        await setProgress(state);
+        state.total = (state.total || 0) + failures.length;
       }
+      // Every failure by this point (scheduling/polling-stage `failures`, or
+      // a task's own download-stage failure via its `cat`) maps back to a
+      // real category key - "Retry failed only" just re-runs START_BULK_SYNC
+      // scoped to whichever of those categories didn't make it into the ZIP.
+      if (!state.cancelled) {
+        const failedCats = [...new Set((state.failures || []).map((f) => f.cat).filter(Boolean))];
+        if (failedCats.length) {
+          state.retry = { type: 'bulk', categories: failedCats, fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        }
+      }
+      await setProgress(state);
+      await recordLastSync(categories.map((c) => BULK_CATEGORY_LABELS[c]).join(', '), state);
       await clearBulkJob();
       return;
     }
   } catch (e) {
     console.warn(TAG, 'bulk sync failed:', e?.message);
+    if (job) await releaseNavTab(job);
     await clearBulkJob();
     await setProgress(newState({ finished: true, error: e?.message || 'Bulk sync failed.' }));
   } finally {
@@ -1515,13 +1809,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startBulkSync({ categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId }) {
+async function startBulkSync({ categories, fromDate, toDate, zipName, tabId }) {
   const sub = {};
   for (const cat of categories) sub[cat] = { phase: 'scheduling' };
   await setBulkJob({
     phase: 'scheduling',
-    categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId,
+    categories, fromDate, toDate, zipName, tabId,
     sub,
+    navTabId: null, navTabOwned: false, navTabFor: null,
     paused: false,
     cancelled: false,
     startedAt: Date.now(),
@@ -1532,6 +1827,12 @@ async function startBulkSync({ categories, fromDate, toDate, gstReportType, gstL
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CLEAR_BADGE') {
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg?.type === 'AUTH_LOGIN') {
     (async () => {
       try {
@@ -1566,14 +1867,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const oJob = await getOrderJob();
       if (oJob) { await setOrderJob({ ...oJob, paused: true }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
-      const rJob = await getReturnsJob();
-      if (rJob) { await setReturnsJob({ ...rJob, paused: true }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
       const pJob = await getPaymentsJob();
       if (pJob) { await setPaymentsJob({ ...pJob, paused: true }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
       const gJob = await getGstJob();
       if (gJob) { await setGstJob({ ...gJob, paused: true }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
-      const fJob = await getFbaReturnsJob();
-      if (fJob) { await setFbaReturnsJob({ ...fJob, paused: true }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
       const aJob = await getAdsJob();
       if (aJob) { await setAdsJob({ ...aJob, paused: true }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
       const bJob = await getBulkJob();
@@ -1586,14 +1883,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const oJob = await getOrderJob();
       if (oJob) { await setOrderJob({ ...oJob, paused: false }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
-      const rJob = await getReturnsJob();
-      if (rJob) { await setReturnsJob({ ...rJob, paused: false }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
       const pJob = await getPaymentsJob();
       if (pJob) { await setPaymentsJob({ ...pJob, paused: false }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
       const gJob = await getGstJob();
       if (gJob) { await setGstJob({ ...gJob, paused: false }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
-      const fJob = await getFbaReturnsJob();
-      if (fJob) { await setFbaReturnsJob({ ...fJob, paused: false }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
       const aJob = await getAdsJob();
       if (aJob) { await setAdsJob({ ...aJob, paused: false }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
       const bJob = await getBulkJob();
@@ -1616,14 +1909,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const oJob = await getOrderJob();
       if (oJob && !oJob.paused && !oJob.cancelled) orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message));
-      const rJob = await getReturnsJob();
-      if (rJob && !rJob.paused && !rJob.cancelled) returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message));
       const pJob = await getPaymentsJob();
       if (pJob && !pJob.paused && !pJob.cancelled) paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message));
       const gJob = await getGstJob();
       if (gJob && !gJob.paused && !gJob.cancelled) gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message));
-      const fJob = await getFbaReturnsJob();
-      if (fJob && !fJob.paused && !fJob.cancelled) fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message));
       const aJob = await getAdsJob();
       if (aJob && !aJob.paused && !aJob.cancelled) adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message));
       const bJob = await getBulkJob();
@@ -1637,14 +1926,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const oJob = await getOrderJob();
       if (oJob) { await setOrderJob({ ...oJob, cancelled: true, paused: false }); orderSyncTick().catch((e) => console.error(TAG, 'tick failed:', e?.message)); }
-      const rJob = await getReturnsJob();
-      if (rJob) { await setReturnsJob({ ...rJob, cancelled: true, paused: false }); returnsSyncTick().catch((e) => console.error(TAG, 'returns tick failed:', e?.message)); }
       const pJob = await getPaymentsJob();
       if (pJob) { await setPaymentsJob({ ...pJob, cancelled: true, paused: false }); paymentsSyncTick().catch((e) => console.error(TAG, 'payments tick failed:', e?.message)); }
       const gJob = await getGstJob();
       if (gJob) { await setGstJob({ ...gJob, cancelled: true, paused: false }); gstSyncTick().catch((e) => console.error(TAG, 'gst tick failed:', e?.message)); }
-      const fJob = await getFbaReturnsJob();
-      if (fJob) { await setFbaReturnsJob({ ...fJob, cancelled: true, paused: false }); fbaReturnsSyncTick().catch((e) => console.error(TAG, 'fba returns tick failed:', e?.message)); }
       const aJob = await getAdsJob();
       if (aJob) { await setAdsJob({ ...aJob, cancelled: true, paused: false }); adsSyncTick().catch((e) => console.error(TAG, 'ads tick failed:', e?.message)); }
       const bJob = await getBulkJob();
@@ -1685,44 +1970,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await startOrderSync({ fromDate, toDate, zipName, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'sync failed to start:', e?.message);
-        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
-      }
-    })();
-    sendResponse({ ok: true });
-    return false;
-  }
-
-  if (msg?.type === 'START_RETURNS_SYNC') {
-    (async () => {
-      try {
-        await setProgress(newState({ current: 'Starting sync...' }));
-
-        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
-        if (!tabs.length) {
-          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
-          return;
-        }
-        const tab = tabs.find((t) => t.active) || tabs[0];
-
-        if (!(await ensureContentScript(tab.id))) {
-          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
-          return;
-        }
-
-        const { fromDate, toDate, zipName } = msg;
-        if (!fromDate || !toDate) {
-          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
-          return;
-        }
-        if (fromDate > toDate) {
-          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
-          return;
-        }
-
-        console.log(TAG, `starting returns sync: ${fromDate} to ${toDate}`);
-        await startReturnsSync({ fromDate, toDate, zipName, tabId: tab.id });
-      } catch (e) {
-        console.warn(TAG, 'returns sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
       }
     })();
@@ -1785,9 +2032,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { reportType, label, fromDate, toDate, zipName } = msg;
-        if (!reportType || !label) {
-          await setProgress(newState({ finished: true, error: 'Pick B2B or B2C first.' }));
+        const { types, fromDate, toDate, zipName } = msg;
+        if (!Array.isArray(types) || !types.length) {
+          await setProgress(newState({ finished: true, error: 'Pick B2B and/or B2C first.' }));
           return;
         }
         if (!fromDate || !toDate) {
@@ -1799,48 +2046,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        console.log(TAG, `starting gst sync: ${label} ${fromDate} to ${toDate}`);
-        await startGstSync({ reportType, label, fromDate, toDate, zipName, tabId: tab.id });
+        console.log(TAG, `starting gst sync: ${types.join('+')} ${fromDate} to ${toDate}`);
+        await startGstSync({ types, fromDate, toDate, zipName, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'gst sync failed to start:', e?.message);
-        await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
-      }
-    })();
-    sendResponse({ ok: true });
-    return false;
-  }
-
-  if (msg?.type === 'START_FBA_RETURNS_SYNC') {
-    (async () => {
-      try {
-        await setProgress(newState({ current: 'Starting sync...' }));
-
-        const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
-        if (!tabs.length) {
-          await setProgress(newState({ finished: true, error: 'Open Amazon Seller Central (logged in) first.' }));
-          return;
-        }
-        const tab = tabs.find((t) => t.active) || tabs[0];
-
-        if (!(await ensureContentScript(tab.id))) {
-          await setProgress(newState({ finished: true, error: 'Could not connect to the Seller Central tab. Please reload the page and try again.' }));
-          return;
-        }
-
-        const { fromDate, toDate, zipName } = msg;
-        if (!fromDate || !toDate) {
-          await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
-          return;
-        }
-        if (fromDate > toDate) {
-          await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
-          return;
-        }
-
-        console.log(TAG, `starting fba returns sync: ${fromDate} to ${toDate}`);
-        await startFbaReturnsSync({ fromDate, toDate, zipName, tabId: tab.id });
-      } catch (e) {
-        console.warn(TAG, 'fba returns sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
       }
     })();
@@ -1905,7 +2114,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { categories, fromDate, toDate, gstReportType, gstLabel, zipName } = msg;
+        const { categories, fromDate, toDate, zipName } = msg;
         if (!Array.isArray(categories) || !categories.length) {
           await setProgress(newState({ finished: true, error: 'Pick at least one report type first.' }));
           return;
@@ -1918,13 +2127,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await setProgress(newState({ finished: true, error: 'From date must be before the To date.' }));
           return;
         }
-        if (categories.includes('gst') && (!gstReportType || !gstLabel)) {
-          await setProgress(newState({ finished: true, error: 'Pick B2B or B2C first.' }));
-          return;
-        }
 
         console.log(TAG, `starting bulk sync: ${categories.join(',')} ${fromDate} to ${toDate}`);
-        await startBulkSync({ categories, fromDate, toDate, gstReportType, gstLabel, zipName, tabId: tab.id });
+        await startBulkSync({ categories, fromDate, toDate, zipName, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'bulk sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));

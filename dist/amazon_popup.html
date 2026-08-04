@@ -43,6 +43,18 @@
       position: relative; z-index: 1;
     }
     .badge-dot { width: 5px; height: 5px; background: #1a1200; border-radius: 50%; flex-shrink: 0; opacity: 0.55; }
+    .theme-toggle {
+      flex-shrink: 0; width: 25px; height: 25px;
+      border: none; border-radius: 7px; background: rgba(255,255,255,0.1);
+      color: #fff; cursor: pointer; position: relative; z-index: 1;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s;
+    }
+    .theme-toggle:hover { background: rgba(255,255,255,0.18); }
+    .theme-toggle svg { display: none; }
+    .theme-toggle .theme-icon-moon { display: block; }
+    :root[data-theme="dark"] .theme-toggle .theme-icon-sun { display: block; }
+    :root[data-theme="dark"] .theme-toggle .theme-icon-moon { display: none; }
 
     /* ── User bar ── */
     .user-bar {
@@ -80,6 +92,15 @@
     }
     .logout-btn:hover { background: #fff1e0; color: #E85D04; }
 
+    /* ── Last sync summary ── */
+    .last-sync {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 18px; border-bottom: 1px solid #ecedf3;
+      background: #fbfbfd; color: #8a8f9c; font-size: 10.5px; font-weight: 600;
+    }
+    .last-sync svg { flex-shrink: 0; }
+    #lastSyncText { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
     /* ── Login view ── */
     .login-view { padding: 26px 22px 20px; }
     .login-hero { display: flex; flex-direction: column; align-items: center; margin-bottom: 18px; }
@@ -92,13 +113,26 @@
     }
     .login-title { font-size: 15px; font-weight: 700; color: #16181d; margin-bottom: 3px; }
     .login-intro { font-size: 11.5px; color: #8a8f9c; text-align: center; }
-    .login-field { position: relative; margin-bottom: 10px; }
-    .field-icon {
-      position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
-      color: #b6bac4; pointer-events: none; display: flex;
+
+    /* ── Login: quick "what this does" strip for a first-time user ── */
+    .login-features {
+      display: flex; flex-direction: column; gap: 7px;
+      margin: 16px 0 18px; padding: 11px 12px;
+      background: #fbfbfd; border: 1px solid #ecedf3; border-radius: 10px;
     }
+    .login-feature {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; font-weight: 600; color: #4b5563;
+    }
+    .lf-icon {
+      flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%;
+      background: linear-gradient(135deg, #FFAC33, #E85D04);
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    .login-field { position: relative; margin-bottom: 10px; }
     .login-input {
-      width: 100%; padding: 10px 12px 10px 34px;
+      width: 100%; padding: 10px 12px;
       border: 1.5px solid #e5e7ef; border-radius: 9px;
       font-size: 13px; font-family: inherit; color: #16181d; outline: none;
       background: #fbfbfd;
@@ -136,15 +170,32 @@
       display: none;
     }
 
-    /* ── Tabs - 3-col grid so 6 tabs wrap evenly into 2 rows instead of ── */
-    /* squeezing/overflowing a single flex row past the popup's fixed width */
-    .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 12px 18px 0; background: #fff; }
+    /* ── Tab groups - two top-level choices (Reports / Bulk Sync) instead ── */
+    /* of 6 flat tabs fighting for space - Reports' own 5 report types live */
+    /* one level down, in a single scrollable row rather than a forced grid */
+    /* wrap, so full labels never truncate and Bulk's row disappears */
+    /* entirely while it's the active group. */
+    .tab-groups { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 10px 18px 0; background: #fff; }
+    .tab-group-btn {
+      padding: 8px 6px; border: 1.5px solid #ecedf3; border-radius: 9px;
+      background: #fbfbfd; color: #6b7280; font-size: 12px; font-weight: 700;
+      cursor: pointer; transition: border-color 0.12s, background 0.12s, color 0.12s;
+    }
+    .tab-group-btn:hover { border-color: #FFC97A; color: #E85D04; }
+    .tab-group-btn.active { border-color: #FF9900; background: #fff8ee; color: #E85D04; }
+
+    .tabs {
+      display: flex; gap: 5px; padding: 8px 18px 0; background: #fff;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
     .tab-btn {
-      padding: 8px 4px; border: none; border-radius: 9px 9px 0 0;
+      flex: 0 0 auto;
+      padding: 8px 10px; border: none; border-radius: 9px 9px 0 0;
       background: transparent; color: #9aa0ac; font-size: 11.5px; font-weight: 700;
       cursor: pointer; transition: color 0.12s, background 0.12s;
       border-bottom: 2.5px solid transparent;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .tab-btn:hover { color: #E85D04; }
     .tab-btn.active { color: #E85D04; border-bottom-color: #FF9900; background: #fff8ee; }
@@ -170,6 +221,41 @@
     }
     .card-sub { font-size: 10.5px; color: #9aa0ac; margin-bottom: 13px; line-height: 1.45; }
 
+    /* ── Inline "why" tooltip - a small (?) instead of a permanent note ── */
+    /* line taking up vertical space whether or not anyone needed to read it */
+    .info-tip {
+      position: relative; display: inline-flex; align-items: center; justify-content: center;
+      width: 15px; height: 15px; margin-left: 5px; flex-shrink: 0;
+      border-radius: 50%; background: #eef0f3; color: #8a8f9c;
+      font-size: 10px; font-weight: 700; cursor: help;
+      transition: background 0.12s, color 0.12s;
+    }
+    .info-tip:hover, .info-tip.open { background: #fff3e0; color: #E85D04; }
+    .info-tip-bubble {
+      /* Anchored to the icon's RIGHT edge, growing leftward - the icon
+         always sits at the end of a title of varying length, so it can be
+         anywhere from the middle to near the card's right edge; growing
+         left always has the title's own width as headroom, while growing
+         right (the original approach) ran out of room and got clipped by
+         the popup's own fixed 360px edge whenever the title was long
+         (e.g. "Sponsored Products Search Term Report"). */
+      position: absolute; top: 20px; right: 0; width: 175px; max-width: 58vw;
+      background: #16181d; color: #f1f2f4; font-size: 10.5px; font-weight: 500; line-height: 1.45;
+      padding: 8px 10px; border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+      opacity: 0; visibility: hidden; pointer-events: none;
+      transition: opacity 0.12s;
+      z-index: 20;
+    }
+    .info-tip:hover .info-tip-bubble, .info-tip:focus .info-tip-bubble, .info-tip.open .info-tip-bubble {
+      opacity: 1; visibility: visible;
+    }
+    /* For a tip whose icon sits near the card's LEFT edge (short title
+       before it, e.g. "Returns Report") - growing left like the default
+       would overflow past the card's own left edge instead, so this grows
+       right instead, same as the default did before the Ads-panel fix. */
+    .info-tip-bubble.align-left { right: auto; left: 0; }
+
     .field { margin-bottom: 11px; }
     label { display: block; font-size: 10px; font-weight: 700; color: #8a8f9c; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
     input[type="text"], input[type="date"] {
@@ -183,6 +269,71 @@
     .date-range { display: flex; gap: 8px; align-items: center; }
     .date-range > div { flex: 1; min-width: 0; }
     .date-range .sep { color: #b6bac4; font-size: 10.5px; font-weight: 600; padding-top: 15px; flex: none; }
+
+    /* ── Custom calendar date-range picker (Meesho-style, orange theme) ── */
+    .chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
+    .chip {
+      padding: 5px 4px; font-size: 11.5px; border-radius: 7px;
+      border: 1.5px solid #e5e7ef; background: #fbfbfd;
+      font-weight: 500; color: #6b7280; cursor: pointer; text-align: center;
+      transition: border-color 0.13s, color 0.13s, background 0.13s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-family: inherit;
+    }
+    .chip:hover { border-color: #FFC97A; color: #E85D04; background: #fff8ee; }
+    .chip.active { border-color: #FF9900; background: #fff3e0; color: #b8500a; font-weight: 700; }
+
+    .cal { border: 1.5px solid #ececf1; border-radius: 10px; padding: 7px 8px 8px; background: #fff; }
+    .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+    .cal-selects { display: flex; gap: 5px; align-items: center; }
+    .cal-select {
+      appearance: none; -webkit-appearance: none; -moz-appearance: none;
+      font-family: inherit; font-size: 12px; font-weight: 700; color: #16181d;
+      background: #f6f5fb url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") no-repeat right 7px center;
+      border: 1.5px solid #ececf1; border-radius: 7px;
+      padding: 4px 21px 4px 9px; cursor: pointer; outline: none;
+      transition: border-color 0.12s, background-color 0.12s;
+    }
+    .cal-select:hover { border-color: #FFC97A; }
+    .cal-select:focus { border-color: #FF9900; }
+    .cal-select option:disabled { color: #d1d5db; }
+    .cal-nav {
+      width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+      border: 1.5px solid #e5e7eb; border-radius: 7px;
+      background: #fff; color: #4b5563; cursor: pointer;
+      transition: border-color 0.12s, background 0.12s, color 0.12s, opacity 0.12s;
+    }
+    .cal-nav:hover:not(:disabled) { border-color: #FFC97A; color: #E85D04; background: #fff8ee; }
+    .cal-nav:disabled { opacity: 0.32; cursor: default; }
+
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+    .cal-dow { text-align: center; font-size: 9.5px; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.2px; padding-bottom: 3px; }
+    .cal-cell {
+      height: 22px; display: flex; align-items: center; justify-content: center;
+      font-size: 12px; color: #374151; border-radius: 7px; cursor: pointer;
+      position: relative; transition: background 0.1s, color 0.1s; user-select: none;
+    }
+    .cal-cell.empty { cursor: default; }
+    .cal-cell.disabled { color: #d1d5db; cursor: default; }
+    .cal-cell:not(.disabled):not(.empty):not(.start):not(.end):hover { background: #fff3e0; color: #b8500a; }
+    .cal-cell.in-range { background: #fff3e0; color: #b8500a; border-radius: 0; }
+    .cal-cell.start, .cal-cell.end { background: #FF9900; color: #fff; font-weight: 700; box-shadow: 0 1px 5px rgba(255,153,0,0.4); }
+    .cal-cell.start { border-radius: 7px 2px 2px 7px; }
+    .cal-cell.end { border-radius: 2px 7px 7px 2px; }
+    .cal-cell.start.end { border-radius: 7px; }
+    .cal-cell.today:not(.start):not(.end)::after {
+      content: ''; position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+      width: 4px; height: 4px; border-radius: 50%; background: #FF9900;
+    }
+
+    .range-line { display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: 11.5px; }
+    .range-pill {
+      flex: 1; min-width: 0; background: #f9fafb; border: 1.5px solid #f1f1f4; border-radius: 7px;
+      padding: 5px 8px; font-weight: 600; color: #374151;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .range-pill.hint { color: #9ca3af; font-weight: 500; }
+    .range-days { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #b8500a; background: #fff3e0; border-radius: 5px; padding: 3px 6px; }
 
     .radio-group { display: flex; gap: 16px; padding: 2px 0 3px; }
     .radio-option {
@@ -198,75 +349,54 @@
       display: none;
     }
 
-    /* ── Bulk: report-type cards - compact 2-col grid, not long bars ── */
-    .bulk-ds-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    /* ── Bulk: report-type chips - small pill rows, not big square tiles ── */
+    /* (the old icon-tile version pushed the panel past its fixed height and */
+    /* forced a scrollbar - these small horizontal chips fix that) */
+    .bulk-ds-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
     .ds-card {
-      display: flex; flex-direction: column; align-items: center; gap: 4px;
-      padding: 9px 4px 8px; border-radius: 11px; text-align: center;
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 9px; border-radius: 8px;
       border: 1.5px solid #e5e7ef; background: #fbfbfd;
-      cursor: pointer; position: relative;
-      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+      cursor: pointer; user-select: none;
+      transition: border-color 0.12s, background 0.12s;
     }
-    .ds-card:hover { border-color: #FFC97A; }
-    .ds-card.checked { border-color: #FF9900; background: #fff8ee; box-shadow: 0 0 0 3px rgba(255,153,0,0.1); }
-    .ds-card.disabled { opacity: 0.45; cursor: default; }
-    .ds-card.disabled:hover { border-color: #e5e7ef; }
+    .ds-card:hover { border-color: #FFC97A; background: #fff8ee; }
+    .ds-card.checked { border-color: #FF9900; background: #fff3e0; }
+    .ds-card.disabled { opacity: 0.5; cursor: default; pointer-events: none; }
     .ds-card input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
-    .ds-icon {
-      width: 23px; height: 23px; border-radius: 7px; flex-shrink: 0;
-      display: flex; align-items: center; justify-content: center; color: #1a1200;
-      background: linear-gradient(135deg, #FFD98A 0%, #FF9900 100%);
-    }
-    .ds-label { font-size: 10.5px; font-weight: 700; color: #16181d; line-height: 1.2; }
     .ds-box {
-      position: absolute; top: 5px; right: 5px;
-      width: 15px; height: 15px; border-radius: 5px; flex-shrink: 0;
-      border: 2px solid #d7dae2; background: #fff;
+      width: 14px; height: 14px; flex-shrink: 0;
+      border: 1.5px solid #cbd5e1; border-radius: 4px; background: #fff;
       display: flex; align-items: center; justify-content: center;
-      transition: background 0.15s, border-color 0.15s;
+      transition: background 0.12s, border-color 0.12s;
     }
     .ds-card.checked .ds-box { background: linear-gradient(135deg, #FFAC33, #E85D04); border-color: transparent; }
-    .ds-box svg { opacity: 0; transform: scale(0.5); transition: opacity 0.12s, transform 0.12s; }
-    .ds-card.checked .ds-box svg { opacity: 1; transform: scale(1); }
+    .ds-box svg { opacity: 0; transition: opacity 0.1s; }
+    .ds-card.checked .ds-box svg { opacity: 1; }
+    .ds-label { font-size: 11.5px; font-weight: 600; color: #374151; }
+    .ds-card.checked .ds-label { color: #b8500a; }
 
     /* ── Bulk: live per-category progress - same compact 2-col grid ── */
-    .bulk-live-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    /* ── Live per-category status - small chip rows, not big square tiles ── */
+    /* (matches the .ds-card selection-chip redesign - color/circle coding */
+    /* itself is untouched, still driven entirely by inline styles from */
+    /* paintLiveRow() in popup.js, not by CSS classes) */
+    .bulk-live-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
     .live-row {
-      display: flex; flex-direction: column; align-items: center; gap: 5px;
-      padding: 10px 4px 9px; border-radius: 11px; text-align: center;
+      display: flex; align-items: center; gap: 7px;
+      padding: 6px 9px; border-radius: 8px;
       border: 1.5px solid #ecedf3; background: #fff;
       transition: border-color 0.2s, background 0.2s;
     }
     .live-dot {
-      width: 15px; height: 15px; border-radius: 50%; flex-shrink: 0;
-      box-sizing: border-box; border: 2.5px solid transparent;
+      width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+      box-sizing: border-box; border: 2px solid transparent;
     }
-    /* Waiting: a clearly-visible hollow ring (not a pale filled dot, which
-       was nearly invisible against the white row background) - reads as
-       "not started yet" rather than looking like no status at all. */
-    .live-dot.waiting { background: #fff; border-color: #98a1b0; }
-    /* In progress: a real spinning loader ring, not just a pulsing dot -
-       bold two-tone border so both the color and the rotation are obvious
-       at a glance, not just a subtle tint. */
-    .live-dot.progress {
-      background: transparent;
-      border-color: #ffcb70;
-      border-top-color: #E85D04;
-      border-right-color: #E85D04;
-      animation: liveSpin 0.7s linear infinite;
-    }
-    .live-dot.done { background: #16a34a; border-color: #16a34a; }
-    .live-dot.failed { background: #dc2626; border-color: #dc2626; }
     @keyframes liveSpin {
       to { transform: rotate(360deg); }
     }
-    .live-row.done { border-color: #bbf0d1; background: #f2fbf6; }
-    .live-row.failed { border-color: #fecaca; background: #fef2f2; }
-    .live-label { font-size: 10.5px; font-weight: 700; color: #16181d; line-height: 1.2; }
-    .live-status { font-size: 9.5px; font-weight: 700; color: #9aa0ac; line-height: 1.2; }
-    .live-status.progress { color: #E85D04; }
-    .live-status.done { color: #15803d; }
-    .live-status.failed { color: #b91c1c; }
+    .live-label { font-size: 11.5px; font-weight: 600; color: #374151; }
+    .live-status { margin-left: auto; font-size: 9.5px; font-weight: 700; color: #9aa0ac; white-space: nowrap; }
 
     #sync, #syncReturns, #syncPayments, #syncGst, #syncAds, #syncBulk {
       width: 100%; margin-top: 6px; padding: 10px 14px;
@@ -317,6 +447,23 @@
     .progress-done { font-size: 12px; font-weight: 700; margin-top: 6px; display: flex; align-items: center; gap: 5px; }
     .progress-done.ok { color: #15803d; }
     .progress-done.cancel { color: #6b7280; }
+    .progress-done svg { flex-shrink: 0; }
+    @keyframes successPop {
+      0% { transform: scale(0.6); opacity: 0; }
+      55% { transform: scale(1.12); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .progress-done.pop-in { animation: successPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); }
+
+    #retryFailedBtn {
+      width: 100%; margin-top: 9px; padding: 7px 8px; border-radius: 8px;
+      border: 1.5px solid #FFC97A; background: #fff8ee; color: #b8500a;
+      font-size: 11.5px; font-weight: 700; cursor: pointer; font-family: inherit;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    #retryFailedBtn:hover { border-color: #FF9900; background: #fff3e0; }
+    #retryFailedBtn:disabled { opacity: 0.5; cursor: default; }
 
     .progress-actions { display: flex; gap: 7px; margin-top: 11px; }
     .progress-actions button {
@@ -342,6 +489,108 @@
       font-weight: 700; opacity: 0.85; transition: opacity 0.1s;
     }
     .footer-right a:hover { opacity: 1; text-decoration: underline; }
+
+    /* ── Dark mode ── */
+    /* Manually toggled via the theme button (popup.js sets data-theme on
+       <html>, defaulting to the OS's prefers-color-scheme the first time
+       the popup ever opens, then remembering whatever the user picks from
+       then on - not automatic after that). Purely additive overrides (same
+       selectors as light mode, colors only) - the header, login-hero icon,
+       and every orange/green/red gradient button already work unchanged in
+       dark mode (dark-on-orange text and saturated status colors both read
+       fine against a dark page too), so only the light surfaces/borders/
+       muted text actually need swapping. */
+    :root[data-theme="dark"] body { background: #17181c; color: #e8e9ec; }
+
+      :root[data-theme="dark"] .user-bar { background: #1f2126; border-bottom-color: #303338; }
+      :root[data-theme="dark"] .user-name { color: #e8e9ec; }
+      :root[data-theme="dark"] .user-email { color: #9aa0ac; }
+      :root[data-theme="dark"] .logout-btn:hover { background: #3a2a12; }
+
+      :root[data-theme="dark"] .last-sync { background: #1b1c21; border-bottom-color: #303338; color: #9aa0ac; }
+
+      :root[data-theme="dark"] .login-title { color: #e8e9ec; }
+      :root[data-theme="dark"] .login-intro { color: #9aa0ac; }
+      :root[data-theme="dark"] .login-features { background: #1f2126; border-color: #303338; }
+      :root[data-theme="dark"] .login-feature { color: #cbd0da; }
+      :root[data-theme="dark"] .field-icon { color: #6a6f7a; }
+      :root[data-theme="dark"] .login-input { background: #24262c; border-color: #34363d; color: #e8e9ec; }
+      :root[data-theme="dark"] .login-input:focus { background: #26282f; }
+      :root[data-theme="dark"] .pw-toggle { color: #6a6f7a; }
+      :root[data-theme="dark"] .login-error { background: #2a1414; border-color: #4a2020; color: #f3a4a4; }
+
+      :root[data-theme="dark"] .tab-groups { background: #1f2126; }
+      :root[data-theme="dark"] .tab-group-btn { background: #24262c; border-color: #34363d; color: #9aa0ac; }
+      :root[data-theme="dark"] .tab-group-btn:hover { border-color: #b8621c; color: #ffb454; }
+      :root[data-theme="dark"] .tab-group-btn.active { border-color: #FF9900; background: #3a2a12; color: #ffb454; }
+
+      :root[data-theme="dark"] .tabs { background: #1f2126; }
+      :root[data-theme="dark"] .tab-btn { color: #9aa0ac; }
+      :root[data-theme="dark"] .tab-btn.active { background: #3a2a12; }
+
+      :root[data-theme="dark"] .card { background: #1f2126; border-color: #303338; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+      :root[data-theme="dark"] .card-title { color: #e8e9ec; }
+      :root[data-theme="dark"] .card-sub { color: #9aa0ac; }
+      :root[data-theme="dark"] .info-tip { background: #2a2c33; color: #9aa0ac; }
+      :root[data-theme="dark"] .info-tip:hover, :root[data-theme="dark"] .info-tip.open { background: #3a2a12; color: #ffb454; }
+      :root[data-theme="dark"] .info-tip-bubble { background: #0c0d0f; color: #e8e9ec; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
+      :root[data-theme="dark"] label { color: #8b909c; }
+      :root[data-theme="dark"] input[type="text"], :root[data-theme="dark"] input[type="date"] { background: #24262c; border-color: #34363d; color: #e8e9ec; }
+      :root[data-theme="dark"] input[type="text"]:focus, :root[data-theme="dark"] input[type="date"]:focus { background: #26282f; }
+      :root[data-theme="dark"] .date-range .sep { color: #6a6f7a; }
+
+      :root[data-theme="dark"] .chip { background: #24262c; border-color: #34363d; color: #9aa0ac; }
+      :root[data-theme="dark"] .chip:hover { border-color: #b8621c; color: #ffb454; background: #2e2410; }
+      :root[data-theme="dark"] .chip.active { border-color: #FF9900; background: #3a2a12; color: #ffb454; }
+
+      :root[data-theme="dark"] .cal { background: #1f2126; border-color: #303338; }
+      :root[data-theme="dark"] .cal-select { background-color: #24262c; border-color: #34363d; color: #e8e9ec; }
+      :root[data-theme="dark"] .cal-select:hover { border-color: #b8621c; }
+      :root[data-theme="dark"] .cal-select option { background: #24262c; color: #e8e9ec; }
+      :root[data-theme="dark"] .cal-select option:disabled { color: #4b4f58; }
+      :root[data-theme="dark"] .cal-nav { background: #24262c; border-color: #34363d; color: #b7bcc7; }
+      :root[data-theme="dark"] .cal-nav:hover:not(:disabled) { border-color: #b8621c; color: #ffb454; background: #2e2410; }
+      :root[data-theme="dark"] .cal-dow { color: #6a6f7a; }
+      :root[data-theme="dark"] .cal-cell { color: #cbd0da; }
+      :root[data-theme="dark"] .cal-cell.disabled { color: #4b4f58; }
+      :root[data-theme="dark"] .cal-cell:not(.disabled):not(.empty):not(.start):not(.end):hover { background: #3a2a12; color: #ffb454; }
+      :root[data-theme="dark"] .cal-cell.in-range { background: #3a2a12; color: #ffb454; }
+
+      :root[data-theme="dark"] .range-pill { background: #24262c; border-color: #34363d; color: #cbd0da; }
+      :root[data-theme="dark"] .range-pill.hint { color: #6a6f7a; }
+      :root[data-theme="dark"] .range-days { color: #ffb454; background: #3a2a12; }
+
+      :root[data-theme="dark"] .radio-option { color: #e8e9ec; }
+      :root[data-theme="dark"] .form-error { background: #2a1414; border-color: #4a2020; color: #f3a4a4; }
+
+      :root[data-theme="dark"] .ds-card { background: #24262c; border-color: #34363d; }
+      :root[data-theme="dark"] .ds-card:hover { border-color: #b8621c; background: #2e2410; }
+      :root[data-theme="dark"] .ds-card.checked { border-color: #FF9900; background: #3a2a12; }
+      :root[data-theme="dark"] .ds-box { background: #1f2126; border-color: #4b4f58; }
+      :root[data-theme="dark"] .ds-label { color: #cbd0da; }
+      :root[data-theme="dark"] .ds-card.checked .ds-label { color: #ffb454; }
+
+      :root[data-theme="dark"] .live-row { background: #1f2126; border-color: #303338; }
+      :root[data-theme="dark"] .live-label { color: #cbd0da; }
+      :root[data-theme="dark"] .live-status { color: #8b909c; }
+
+      :root[data-theme="dark"] .progress-card { background: #1f2126; border-color: #303338; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+      :root[data-theme="dark"] .progress-count { color: #e8e9ec; }
+      :root[data-theme="dark"] .progress-track { background: #24262c; }
+      :root[data-theme="dark"] .progress-current { color: #8b909c; }
+      :root[data-theme="dark"] .progress-done.ok { color: #4ade80; }
+      :root[data-theme="dark"] .progress-done.cancel { color: #9aa0ac; }
+      :root[data-theme="dark"] .progress-failures { color: #f3a4a4; }
+      :root[data-theme="dark"] .progress-error { color: #f3a4a4; }
+      :root[data-theme="dark"] #retryFailedBtn { background: #2e2410; border-color: #b8621c; color: #ffb454; }
+      :root[data-theme="dark"] #retryFailedBtn:hover { border-color: #FF9900; background: #3a2a12; }
+      :root[data-theme="dark"] .progress-actions button { background: #24262c; border-color: #34363d; color: #cbd0da; }
+      :root[data-theme="dark"] .progress-actions button:hover { border-color: #b8621c; background: #2e2410; }
+      :root[data-theme="dark"] #cancelBtn { color: #f3a4a4; border-color: #4a2020; }
+      :root[data-theme="dark"] #cancelBtn:hover { border-color: #7a2e2e; background: #2a1414; }
+
+      :root[data-theme="dark"] .footer { background: #1f2126; border-top-color: #303338; }
+      :root[data-theme="dark"] .footer-left { color: #6a6f7a; }
   </style>
 </head>
 <body>
@@ -352,6 +601,10 @@
       <div class="brand-sub">Marketplace Sync</div>
     </div>
     <span class="badge"><span class="badge-dot"></span>Amazon</span>
+    <button class="theme-toggle" id="themeToggle" type="button" title="Switch theme" aria-label="Switch dark/light theme">
+      <svg class="theme-icon-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      <svg class="theme-icon-moon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+    </button>
   </div>
 
   <div class="user-bar" id="userBar" style="display:none">
@@ -366,6 +619,11 @@
     </button>
   </div>
 
+  <div class="last-sync" id="lastSyncBar" style="display:none">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+    <span id="lastSyncText"></span>
+  </div>
+
   <div class="login-view" id="loginView">
     <div class="login-hero">
       <div class="login-hero-icon">
@@ -375,16 +633,25 @@
       <div class="login-intro">Use your Speed Ecom account to unlock<br>Amazon order syncing</div>
     </div>
 
+    <div class="login-features">
+      <div class="login-feature">
+        <span class="lf-icon"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        Orders, Returns &amp; Payments reports
+      </div>
+      <div class="login-feature">
+        <span class="lf-icon"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        GST B2B/B2C and Sponsored Ads reports
+      </div>
+      <div class="login-feature">
+        <span class="lf-icon"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+        Bulk-sync everything into one ZIP
+      </div>
+    </div>
+
     <div class="login-field">
-      <span class="field-icon">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
-      </span>
       <input class="login-input" type="text" id="loginEmail" placeholder="Email address" autocomplete="username">
     </div>
     <div class="login-field password">
-      <span class="field-icon">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      </span>
       <input class="login-input" type="password" id="loginPassword" placeholder="Password" autocomplete="current-password">
       <button class="pw-toggle" id="pwToggle" type="button" title="Show password" aria-label="Show password">
         <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -400,13 +667,16 @@
   </div>
 
   <div id="mainView" style="display:none">
-    <div class="tabs">
+    <div class="tab-groups" id="tabGroups">
+      <button class="tab-group-btn active" id="tabGroupReports" type="button">Reports</button>
+      <button class="tab-group-btn" id="tabGroupBulk" type="button">Bulk Sync</button>
+    </div>
+    <div class="tabs" id="reportsSubTabs">
       <button class="tab-btn active" id="tabOrdersBtn" type="button">Orders</button>
       <button class="tab-btn" id="tabReturnsBtn" type="button">Returns</button>
       <button class="tab-btn" id="tabPaymentsBtn" type="button">Payments</button>
       <button class="tab-btn" id="tabGstBtn" type="button">B2B/B2C</button>
       <button class="tab-btn" id="tabAdsBtn" type="button">Ads</button>
-      <button class="tab-btn" id="tabBulkBtn" type="button">Bulk</button>
     </div>
 
     <div class="body">
@@ -422,10 +692,34 @@
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="fromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="toDate"></div>
+            </div>
+            <div class="chips" id="ordersChips">
+              <button class="chip" data-range="thisMonth">This Month</button>
+              <button class="chip" data-range="lastMonth">Last Month</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="ordersPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="ordersCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="ordersCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="ordersNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="ordersCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="ordersRangePill">Pick a start date</span>
+              <span class="range-days" id="ordersRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -448,24 +742,62 @@
             <span class="card-title-icon">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6"/><path d="M21 12A9 9 0 0 0 6 5.3L3 8"/><path d="M21 22v-6h-6"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/></svg>
             </span>
-            <span id="returnsCardTitle">All Returns Report</span>
+            <span id="returnsCardTitle">Returns Report</span>
+            <span class="info-tip" tabindex="0">?<span class="info-tip-bubble align-left" id="returnsHelpNote">If the right Return Reports page isn't already open, this opens/switches to it automatically.</span></span>
           </div>
-          <div class="card-sub" id="returnsCardSub">Pulls TSV return data from Seller Central's Return Reports page and bundles it into one ZIP.</div>
+          <div class="card-sub" id="returnsCardSub">Pulls Standard and/or FBA Customer Returns data from Seller Central and bundles it into one ZIP.</div>
 
-          <div class="field">
+          <div class="field" id="returnsTypeSection">
             <label>Report Type</label>
-            <div class="radio-group">
-              <label class="radio-option"><input type="radio" name="returnsType" id="returnsTypeStandard" value="standard" checked> Standard Returns</label>
-              <label class="radio-option"><input type="radio" name="returnsType" id="returnsTypeFba" value="fba"> FBA Customer Returns</label>
+            <div class="radio-group" id="returnsTypeRow">
+              <label class="radio-option"><input type="checkbox" id="returnsTypeStandard" checked> Standard Returns</label>
+              <label class="radio-option"><input type="checkbox" id="returnsTypeFba" checked> FBA Customer Returns</label>
+            </div>
+          </div>
+
+          <div class="bulk-live-grid" id="returnsLiveGrid" style="display:none; grid-template-columns: repeat(2, 1fr); margin-bottom:11px;">
+            <div class="live-row" id="returnsLiveStandard">
+              <span class="live-dot" id="returnsLiveStandardDot"></span>
+              <span class="live-label">Standard</span>
+              <span class="live-status" id="returnsLiveStandardStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="returnsLiveFba">
+              <span class="live-dot" id="returnsLiveFbaDot"></span>
+              <span class="live-label">FBA Returns</span>
+              <span class="live-status" id="returnsLiveFbaStatus">Waiting</span>
             </div>
           </div>
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="returnsFromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="returnsToDate"></div>
+            </div>
+            <div class="chips" id="returnsChips">
+              <button class="chip" data-range="thisMonth">This Month</button>
+              <button class="chip" data-range="lastMonth">Last Month</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="returnsPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="returnsCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="returnsCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="returnsNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="returnsCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="returnsRangePill">Pick a start date</span>
+              <span class="range-days" id="returnsRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -479,7 +811,6 @@
             Sync Returns
           </button>
           <div class="form-error" id="returnsFormError"></div>
-          <div class="card-sub" id="returnsHelpNote" style="margin:9px 0 0;">Needs the Return Reports page (Returns → Return Reports) open in this Seller Central tab.</div>
         </div>
       </div>
 
@@ -495,10 +826,34 @@
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="paymentsFromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="paymentsToDate"></div>
+            </div>
+            <div class="chips" id="paymentsChips">
+              <button class="chip" data-range="thisMonth">This Month</button>
+              <button class="chip" data-range="lastMonth">Last Month</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="paymentsPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="paymentsCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="paymentsCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="paymentsNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="paymentsCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="paymentsRangePill">Pick a start date</span>
+              <span class="range-days" id="paymentsRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -521,24 +876,61 @@
             <span class="card-title-icon">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12h6m-6 4h6M9 8h1"/><rect x="4" y="3" width="16" height="18" rx="2"/></svg>
             </span>
-            GST On Demand Report (B2B/B2C)
+            GST Report (B2B/B2C)
           </div>
-          <div class="card-sub">Pulls the Merchant Tax Report from Seller Central's GST On Demand Reports page and bundles it into one ZIP.</div>
+          <div class="card-sub">Pulls the Merchant Tax Report from Seller Central and bundles it into one ZIP.</div>
 
-          <div class="field">
+          <div class="field" id="gstTypeSection">
             <label>Include Transactions</label>
-            <div class="radio-group">
-              <label class="radio-option"><input type="radio" name="gstType" id="gstTypeB2B" value="59300"> B2B</label>
-              <label class="radio-option"><input type="radio" name="gstType" id="gstTypeB2C" value="61200" checked> B2C</label>
+            <div class="radio-group" id="gstTypeRow">
+              <label class="radio-option"><input type="checkbox" id="gstTypeB2B" checked> B2B</label>
+              <label class="radio-option"><input type="checkbox" id="gstTypeB2C" checked> B2C</label>
+            </div>
+          </div>
+
+          <div class="bulk-live-grid" id="gstLiveGrid" style="display:none; grid-template-columns: repeat(2, 1fr); margin-bottom:11px;">
+            <div class="live-row" id="gstLiveB2B">
+              <span class="live-dot" id="gstLiveB2BDot"></span>
+              <span class="live-label">B2B</span>
+              <span class="live-status" id="gstLiveB2BStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="gstLiveB2C">
+              <span class="live-dot" id="gstLiveB2CDot"></span>
+              <span class="live-label">B2C</span>
+              <span class="live-status" id="gstLiveB2CStatus">Waiting</span>
             </div>
           </div>
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="gstFromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="gstToDate"></div>
+            </div>
+            <div class="chips" id="gstChips">
+              <button class="chip" data-range="last45">Last 45 Days</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+              <button class="chip" data-range="thisMonth">This Month</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="gstPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="gstCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="gstCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="gstNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="gstCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="gstRangePill">Pick a start date</span>
+              <span class="range-days" id="gstRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -552,7 +944,6 @@
             Sync B2B/B2C
           </button>
           <div class="form-error" id="gstFormError"></div>
-          <div class="card-sub" style="margin:9px 0 0;">You can request a report for any duration within the last 45 days.</div>
         </div>
       </div>
 
@@ -563,15 +954,40 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a2 2 0 0 1-3.2 2.4L6 15"/></svg>
             </span>
             Sponsored Products Search Term Report
+            <span class="info-tip" tabindex="0">?<span class="info-tip-bubble">Needs the Ads Reports page (Seller Central → Reports → Advertising) open in this tab.</span></span>
           </div>
           <div class="card-sub">Pulls the Search Term report from Amazon Ads' Reports page and bundles it into one ZIP.</div>
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="adsFromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="adsToDate"></div>
+            </div>
+            <div class="chips" id="adsChips">
+              <button class="chip" data-range="maxRange">Max Range</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+              <button class="chip" data-range="thisMonth">This Month</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="adsPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="adsCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="adsCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="adsNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="adsCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="adsRangePill">Pick a start date</span>
+              <span class="range-days" id="adsRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -585,7 +1001,6 @@
             Sync Ads
           </button>
           <div class="form-error" id="adsFormError"></div>
-          <div class="card-sub" style="margin:9px 0 0;">Needs the Ads Reports page (Seller Central → Reports → Advertising) open in this tab.</div>
         </div>
       </div>
 
@@ -601,10 +1016,34 @@
 
           <div class="field">
             <label>Date Range</label>
-            <div class="date-range">
+            <div class="date-range" style="display:none">
               <div><input type="date" id="bulkFromDate"></div>
               <span class="sep">to</span>
               <div><input type="date" id="bulkToDate"></div>
+            </div>
+            <div class="chips" id="bulkChips">
+              <button class="chip" data-range="thisMonth">This Month</button>
+              <button class="chip" data-range="lastMonth">Last Month</button>
+              <button class="chip" data-range="last30">Last 30 Days</button>
+            </div>
+            <div class="cal">
+              <div class="cal-head">
+                <button class="cal-nav" id="bulkPrevMonth" title="Previous month" aria-label="Previous month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="cal-selects">
+                  <select class="cal-select" id="bulkCalMonth" aria-label="Month"></select>
+                  <select class="cal-select" id="bulkCalYear" aria-label="Year"></select>
+                </div>
+                <button class="cal-nav" id="bulkNextMonth" title="Next month" aria-label="Next month">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div class="cal-grid" id="bulkCalGrid"></div>
+            </div>
+            <div class="range-line">
+              <span class="range-pill hint" id="bulkRangePill">Pick a start date</span>
+              <span class="range-days" id="bulkRangeDays" style="display:none"></span>
             </div>
           </div>
 
@@ -614,35 +1053,31 @@
               <label class="ds-card checked" id="bulkOrdersCard">
                 <input type="checkbox" id="bulkOrders" checked>
                 <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20.42 4.58a2 2 0 0 0-2.83 0L4.58 17.59a2 2 0 0 0-.58 1.41V21h2a2 2 0 0 0 1.41-.58L20.42 7.4a2 2 0 0 0 0-2.82Z"/></svg></span>
                 <span class="ds-label">Orders</span>
               </label>
               <label class="ds-card checked" id="bulkPaymentsCard">
                 <input type="checkbox" id="bulkPayments" checked>
                 <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg></span>
                 <span class="ds-label">Payments</span>
               </label>
               <label class="ds-card checked" id="bulkGstCard">
                 <input type="checkbox" id="bulkGst" checked>
                 <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12h6m-6 4h6M9 8h1"/><rect x="4" y="3" width="16" height="18" rx="2"/></svg></span>
                 <span class="ds-label">B2B/B2C</span>
               </label>
               <label class="ds-card checked" id="bulkReturnsCard">
                 <input type="checkbox" id="bulkReturns" checked>
                 <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-                <span class="ds-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6"/><path d="M21 12A9 9 0 0 0 6 5.3L3 8"/><path d="M21 22v-6h-6"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/></svg></span>
                 <span class="ds-label">Returns</span>
               </label>
             </div>
             <div class="radio-group" id="bulkGstTypeRow" style="margin-top:7px;">
-              <label class="radio-option"><input type="radio" name="bulkGstType" id="bulkGstTypeB2B" value="59300"> B2B</label>
-              <label class="radio-option"><input type="radio" name="bulkGstType" id="bulkGstTypeB2C" value="61200" checked> B2C</label>
+              <label class="radio-option"><input type="checkbox" id="bulkGstTypeB2B" checked> B2B</label>
+              <label class="radio-option"><input type="checkbox" id="bulkGstTypeB2C" checked> B2C</label>
             </div>
             <div class="radio-group" id="bulkReturnsTypeRow" style="margin-top:7px;">
-              <label class="radio-option"><input type="radio" name="bulkReturnsType" id="bulkReturnsTypeStandard" value="standard" checked> Standard Returns</label>
-              <label class="radio-option"><input type="radio" name="bulkReturnsType" id="bulkReturnsTypeFba" value="fba"> FBA Customer Returns</label>
+              <label class="radio-option"><input type="checkbox" id="bulkReturnsTypeStandard" checked> Standard Returns</label>
+              <label class="radio-option"><input type="checkbox" id="bulkReturnsTypeFba" checked> FBA Customer Returns</label>
             </div>
             <div class="card-sub" id="bulkAvailabilityNote" style="margin:6px 0 0; display:none;"></div>
           </div>
@@ -658,10 +1093,15 @@
               <span class="live-label">Payments</span>
               <span class="live-status" id="bulkLivePaymentsStatus">Waiting</span>
             </div>
-            <div class="live-row" id="bulkLiveGst">
-              <span class="live-dot" id="bulkLiveGstDot"></span>
-              <span class="live-label">B2B/B2C</span>
-              <span class="live-status" id="bulkLiveGstStatus">Waiting</span>
+            <div class="live-row" id="bulkLiveGstB2B">
+              <span class="live-dot" id="bulkLiveGstB2BDot"></span>
+              <span class="live-label">GST B2B</span>
+              <span class="live-status" id="bulkLiveGstB2BStatus">Waiting</span>
+            </div>
+            <div class="live-row" id="bulkLiveGstB2C">
+              <span class="live-dot" id="bulkLiveGstB2CDot"></span>
+              <span class="live-label">GST B2C</span>
+              <span class="live-status" id="bulkLiveGstB2CStatus">Waiting</span>
             </div>
             <div class="live-row" id="bulkLiveReturns">
               <span class="live-dot" id="bulkLiveReturnsDot"></span>
@@ -699,6 +1139,10 @@
           <div class="progress-failures" id="progressFailures"></div>
           <div class="progress-error" id="progressError"></div>
           <div class="progress-done" id="progressDone"></div>
+          <button id="retryFailedBtn" type="button" style="display:none;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            <span id="retryFailedLabel">Retry Failed Only</span>
+          </button>
 
           <div class="progress-actions" id="progressActions">
             <button id="pauseResumeBtn" type="button">

@@ -3,7 +3,7 @@
   "name": "Amazon Order Report Downloader by SpeedEcom",
   "version": "0.7.0",
   "description": "Bulk-download Amazon Seller Central Order, Returns, Payments, GST B2B/B2C, and Sponsored Ads Reports into ZIPs, with retry and progress tracking, plus a combined Bulk sync mode. Requires a Speed Ecom account.",
-  "permissions": ["storage", "downloads", "scripting", "declarativeNetRequest", "alarms"],
+  "permissions": ["storage", "downloads", "scripting", "declarativeNetRequest", "alarms", "notifications"],
   "host_permissions": [
     "https://sellercentral.amazon.in/*",
     "https://advertising.amazon.in/*",

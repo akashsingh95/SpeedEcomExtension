@@ -2,6 +2,31 @@
 
 const $ = (id) => document.getElementById(id);
 
+// ── Theme: manual toggle, not automatic ──────────────────────────────────
+// The very first time the popup ever opens (no saved preference yet), the
+// OS's prefers-color-scheme just seeds a reasonable starting point - that
+// choice is then persisted immediately, so every later open (and every
+// later OS theme change) is 100% governed by the toggle button from then
+// on, never silently switched back to following the system again.
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : 'light');
+}
+async function initTheme() {
+  let themePref;
+  try { ({ themePref } = await chrome.storage.local.get('themePref')); } catch (_) {}
+  if (themePref !== 'light' && themePref !== 'dark') {
+    themePref = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    try { await chrome.storage.local.set({ themePref }); } catch (_) {}
+  }
+  applyTheme(themePref);
+}
+$('themeToggle').addEventListener('click', async () => {
+  const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  try { await chrome.storage.local.set({ themePref: next }); } catch (_) {}
+});
+initTheme();
+
 function isoDate(d) {
   const pad = (v) => String(v).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -40,6 +65,275 @@ function rangeDays(fromDate, toDate) {
   return Math.round((new Date(`${toDate}T00:00:00`) - new Date(`${fromDate}T00:00:00`)) / 86400000) + 1;
 }
 
+// ── Reusable custom date-range picker (Meesho-style chips + month calendar) ──
+// Drives a pair of already-existing (now hidden) <input type="date"> elements
+// rather than owning date state itself - on every selection it writes ISO
+// values into them and dispatches a real 'change' event, so whatever
+// min/max/clamp/availability logic a tab already has wired to those inputs'
+// 'change' listeners keeps running completely unchanged. After dispatching,
+// it re-reads the (possibly further-adjusted) input values back into its own
+// view before rendering, so any clamping those listeners do is reflected
+// immediately in the calendar.
+const CAL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const CAL_MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const CAL_DOW = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+function parseIsoDate(s) {
+  if (!s) return null;
+  const d = new Date(`${s}T00:00:00`);
+  return isNaN(d.getTime()) ? null : d;
+}
+function calAddDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function calSameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function calFmt(d) { return `${String(d.getDate()).padStart(2, '0')} ${CAL_MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`; }
+function calDaysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
+
+// opts: idPrefix, fromInputId, toInputId, maxDate() -> ISO string,
+// quickRanges: [{ key, label, compute(maxDateObj) -> {start:Date, end:Date} }],
+// minYearsBack (for the year dropdown's floor, default 5).
+function createDateRangePicker(opts) {
+  const fromEl = $(opts.fromInputId);
+  const toEl = $(opts.toInputId);
+  const chipsEl = $(`${opts.idPrefix}Chips`);
+  const gridEl = $(`${opts.idPrefix}CalGrid`);
+  const monthSel = $(`${opts.idPrefix}CalMonth`);
+  const yearSel = $(`${opts.idPrefix}CalYear`);
+  const prevBtn = $(`${opts.idPrefix}PrevMonth`);
+  const nextBtn = $(`${opts.idPrefix}NextMonth`);
+  const pillEl = $(`${opts.idPrefix}RangePill`);
+  const daysEl = $(`${opts.idPrefix}RangeDays`);
+
+  let start = parseIsoDate(fromEl.value);
+  let end = parseIsoDate(toEl.value);
+  let activeChip = null;
+  const anchor = end || start || parseIsoDate(opts.maxDate()) || new Date();
+  let view = { y: anchor.getFullYear(), m: anchor.getMonth() };
+
+  function maxDateObj() { return parseIsoDate(opts.maxDate()) || new Date(); }
+  // Only Orders/Returns/Payments have no earliest-date floor (confirmed live,
+  // deliberately unbounded) - GST/Ads have a real anchored floor Amazon
+  // itself enforces, so opts.minDate is optional and only those two pass it.
+  function minDateObj() { return opts.minDate ? parseIsoDate(opts.minDate()) : null; }
+  function isDisabled(day) {
+    if (day > maxDateObj()) return true;
+    const mn = minDateObj();
+    if (mn && day < mn) return true;
+    return false;
+  }
+
+  function cellClasses(day) {
+    const cls = ['cal-cell'];
+    if (calSameDay(day, new Date())) cls.push('today');
+    if (isDisabled(day)) cls.push('disabled');
+    const isStart = start && calSameDay(day, start);
+    const isEnd = end && calSameDay(day, end);
+    if (isStart) cls.push('start');
+    if (isEnd) cls.push('end');
+    if (start && end && day > start && day < end) cls.push('in-range');
+    return cls;
+  }
+
+  function clampView() {
+    const mx = maxDateObj();
+    if (view.y > mx.getFullYear() || (view.y === mx.getFullYear() && view.m > mx.getMonth())) {
+      view = { y: mx.getFullYear(), m: mx.getMonth() };
+    }
+    const mn = minDateObj();
+    if (mn && (view.y < mn.getFullYear() || (view.y === mn.getFullYear() && view.m < mn.getMonth()))) {
+      view = { y: mn.getFullYear(), m: mn.getMonth() };
+    }
+  }
+
+  function buildHeaderSelects() {
+    if (monthSel.options.length === 0) {
+      CAL_MONTHS.forEach((name, i) => {
+        const o = document.createElement('option');
+        o.value = String(i); o.textContent = name;
+        monthSel.appendChild(o);
+      });
+    }
+    if (yearSel.options.length === 0) {
+      const mx = maxDateObj();
+      const mn = minDateObj();
+      const minYear = mn ? mn.getFullYear() : mx.getFullYear() - (opts.minYearsBack || 5);
+      for (let y = mx.getFullYear(); y >= minYear; y--) {
+        const o = document.createElement('option');
+        o.value = String(y); o.textContent = String(y);
+        yearSel.appendChild(o);
+      }
+    }
+  }
+
+  function syncHeaderSelects() {
+    const mx = maxDateObj();
+    const mn = minDateObj();
+    monthSel.value = String(view.m);
+    yearSel.value = String(view.y);
+    Array.from(monthSel.options).forEach((o) => {
+      const v = Number(o.value);
+      o.disabled = (view.y === mx.getFullYear() && v > mx.getMonth()) || (!!mn && view.y === mn.getFullYear() && v < mn.getMonth());
+    });
+  }
+
+  function renderSummary() {
+    if (start && end) {
+      pillEl.textContent = `${calFmt(start)} → ${calFmt(end)}`;
+      pillEl.classList.remove('hint');
+      daysEl.style.display = '';
+      daysEl.textContent = `${rangeDays(fromEl.value, toEl.value)}d`;
+    } else if (start) {
+      pillEl.textContent = `${calFmt(start)} → pick an end date`;
+      pillEl.classList.add('hint');
+      daysEl.style.display = 'none';
+    } else {
+      pillEl.textContent = 'Pick a start date';
+      pillEl.classList.add('hint');
+      daysEl.style.display = 'none';
+    }
+  }
+
+  function render() {
+    clampView();
+    syncHeaderSelects();
+    nextBtn.disabled = (view.y === maxDateObj().getFullYear() && view.m === maxDateObj().getMonth());
+    const mn = minDateObj();
+    prevBtn.disabled = !!mn && view.y === mn.getFullYear() && view.m === mn.getMonth();
+
+    gridEl.innerHTML = '';
+    for (const d of CAL_DOW) {
+      const h = document.createElement('div');
+      h.className = 'cal-dow';
+      h.textContent = d;
+      gridEl.appendChild(h);
+    }
+
+    const firstDow = new Date(view.y, view.m, 1).getDay();
+    const total = calDaysInMonth(view.y, view.m);
+    for (let i = 0; i < firstDow; i++) {
+      const blank = document.createElement('div');
+      blank.className = 'cal-cell empty';
+      gridEl.appendChild(blank);
+    }
+    for (let day = 1; day <= total; day++) {
+      const d = new Date(view.y, view.m, day);
+      const cell = document.createElement('div');
+      cell.className = cellClasses(d).join(' ');
+      cell.textContent = String(day);
+      if (!isDisabled(d)) cell.dataset.date = isoDate(d);
+      gridEl.appendChild(cell);
+    }
+
+    renderSummary();
+  }
+
+  function setActiveChip(key) {
+    chipsEl.querySelectorAll('.chip').forEach((c) => c.classList.toggle('active', key && c.dataset.range === key));
+  }
+
+  // Writes the selection into the backing inputs and lets the tab's own
+  // existing 'change' listeners (clamping, availability graying, etc.) run,
+  // then re-syncs from whatever they left the inputs holding.
+  function commit() {
+    fromEl.value = start ? isoDate(start) : '';
+    toEl.value = end ? isoDate(end) : '';
+    fromEl.dispatchEvent(new Event('change', { bubbles: true }));
+    toEl.dispatchEvent(new Event('change', { bubbles: true }));
+    start = parseIsoDate(fromEl.value);
+    end = parseIsoDate(toEl.value);
+    render();
+  }
+
+  function onDayClick(day) {
+    if (!start || (start && end)) { start = day; end = null; }
+    else if (day < start) { start = day; end = null; }
+    else { end = day; }
+    activeChip = null;
+    setActiveChip(null);
+    commit();
+  }
+
+  function applyRange(key) {
+    const r = (opts.quickRanges || []).find((q) => q.key === key);
+    if (!r) return;
+    const { start: s, end: e } = r.compute(maxDateObj());
+    start = s; end = e; activeChip = key;
+    view = { y: e.getFullYear(), m: e.getMonth() };
+    setActiveChip(key);
+    commit();
+  }
+
+  gridEl.addEventListener('click', (e) => {
+    const cell = e.target.closest('.cal-cell');
+    if (!cell || !cell.dataset.date) return;
+    onDayClick(parseIsoDate(cell.dataset.date));
+  });
+  prevBtn.addEventListener('click', () => { view.m--; if (view.m < 0) { view.m = 11; view.y--; } render(); });
+  nextBtn.addEventListener('click', () => { view.m++; if (view.m > 11) { view.m = 0; view.y++; } render(); });
+  monthSel.addEventListener('change', () => {
+    const m = Number(monthSel.value);
+    view.m = m;
+    const mx = maxDateObj();
+    const mn = minDateObj();
+    let first = new Date(view.y, m, 1);
+    let last = new Date(view.y, m, calDaysInMonth(view.y, m));
+    if (first > mx) first = mx;
+    if (last > mx) last = mx;
+    if (mn && first < mn) first = mn;
+    if (mn && last < mn) last = mn;
+    start = first; end = last; activeChip = null;
+    setActiveChip(null);
+    commit();
+  });
+  yearSel.addEventListener('change', () => { view.y = Number(yearSel.value); render(); });
+  (opts.quickRanges || []).forEach((r) => {
+    const btn = chipsEl.querySelector(`.chip[data-range="${r.key}"]`);
+    if (btn) btn.addEventListener('click', () => applyRange(r.key));
+  });
+
+  buildHeaderSelects();
+  render();
+
+  return {
+    // Re-syncs from the backing inputs' current values - call after any
+    // external code sets fromEl/toEl.value directly (which doesn't fire a
+    // native 'change' event on its own), e.g. initMainApp()'s defaults.
+    refresh() {
+      start = parseIsoDate(fromEl.value);
+      end = parseIsoDate(toEl.value);
+      activeChip = null;
+      setActiveChip(null);
+      const a = end || start || maxDateObj();
+      view = { y: a.getFullYear(), m: a.getMonth() };
+      render();
+    },
+  };
+}
+
+// The common "This Month / Last Month / Last 30 Days" trio, anchored on
+// whatever a tab's own ceiling date is (not raw today) - shared by every
+// panel whose picker has no earliest-date floor (Orders/Returns/Payments/
+// Bulk). GST/Ads have a real anchored floor and define their own ranges.
+function standardQuickRanges() {
+  return [
+    {
+      key: 'thisMonth', label: 'This Month',
+      compute: (mx) => ({ start: new Date(mx.getFullYear(), mx.getMonth(), 1), end: mx }),
+    },
+    {
+      key: 'lastMonth', label: 'Last Month',
+      compute: (mx) => {
+        const firstThis = new Date(mx.getFullYear(), mx.getMonth(), 1);
+        const end = calAddDays(firstThis, -1);
+        return { start: new Date(end.getFullYear(), end.getMonth(), 1), end };
+      },
+    },
+    {
+      key: 'last30', label: 'Last 30 Days',
+      compute: (mx) => ({ start: calAddDays(mx, -29), end: mx }),
+    },
+  ];
+}
+
 // Return Reports' own validation allows up to and including today ("Date
 // range cannot exceed 60 days" / "should not exceed the current date"), but
 // applying the same 2-days-back cutoff as Orders/Payments here too, per
@@ -57,9 +351,6 @@ function maxReturnsSelectableDate() {
 // confirmed live neither the 60-day range cap nor the 2-days-back
 // generation-delay cutoff apply here: a 14+ month range ending on today's
 // date was accepted and generated successfully.
-function isFbaReturnsType() {
-  return $('returnsTypeFba').checked;
-}
 function maxFbaReturnsSelectableDate() {
   return todayStamp();
 }
@@ -73,10 +364,85 @@ function maxFbaReturnsSelectableDate() {
 const BULK_LIVE_META = {
   orders: { row: 'bulkLiveOrders', dot: 'bulkLiveOrdersDot', status: 'bulkLiveOrdersStatus' },
   payments: { row: 'bulkLivePayments', dot: 'bulkLivePaymentsDot', status: 'bulkLivePaymentsStatus' },
-  gst: { row: 'bulkLiveGst', dot: 'bulkLiveGstDot', status: 'bulkLiveGstStatus' },
+  gstB2B: { row: 'bulkLiveGstB2B', dot: 'bulkLiveGstB2BDot', status: 'bulkLiveGstB2BStatus' },
+  gstB2C: { row: 'bulkLiveGstB2C', dot: 'bulkLiveGstB2CDot', status: 'bulkLiveGstB2CStatus' },
   returns: { row: 'bulkLiveReturns', dot: 'bulkLiveReturnsDot', status: 'bulkLiveReturnsStatus' },
   fbaReturns: { row: 'bulkLiveFbaReturns', dot: 'bulkLiveFbaReturnsDot', status: 'bulkLiveFbaReturnsStatus' },
 };
+
+// Shared by both the Bulk tab's per-category grid and the GST tab's own
+// B2B/B2C pair - the backend genuinely polls every still-pending item
+// together each tick (mirrors Meesho's "wait on all at once" efficiency, so
+// a slow one never blocks a fast one from finishing early). More than one
+// can legitimately be "In progress" at the same real moment, and showing
+// that honestly - rather than picking just one to display as active - is
+// what keeps a fast item from appearing to silently skip straight to Done
+// with no visible in-between state.
+// Reads the live data-theme attribute (set by the manual toggle in
+// initTheme()/the themeToggle click handler above) rather than raw OS
+// preference - these dot/row colors are set as inline styles rather than
+// CSS classes (see the earlier debugging note on why), so dark mode needs
+// its own JS-side palette that follows the same manual choice as everything
+// else, not the :root[data-theme="dark"] CSS rules directly.
+function isDarkMode() {
+  return document.documentElement.getAttribute('data-theme') === 'dark';
+}
+
+function paintLiveRow(meta, phase) {
+  const rowEl = $(meta.row);
+  const dotEl = $(meta.dot);
+  const statusEl = $(meta.status);
+  if (!rowEl || !dotEl || !statusEl) return;
+
+  const dark = isDarkMode();
+  let text = 'Pending';
+  let dotBg = dark ? '#1f2126' : '#ffffff';
+  let dotBorder = dark ? '#4b4f58' : '#98a1b0';
+  let spin = false;
+  let statusColor = dark ? '#8b909c' : '#9aa0ac';
+  let rowBg = dark ? '#1f2126' : '#ffffff';
+  let rowBorder = dark ? '#303338' : '#ecedf3';
+
+  if (phase === 'scheduling' || phase === 'polling') {
+    text = 'In progress...';
+    dotBg = 'transparent'; dotBorder = '#ffcb70'; spin = true;
+    statusColor = '#E85D04';
+  } else if (phase === 'ready') {
+    text = 'Done';
+    dotBg = '#16a34a'; dotBorder = '#16a34a';
+    statusColor = dark ? '#4ade80' : '#15803d';
+    rowBg = dark ? '#0f2318' : '#f2fbf6'; rowBorder = dark ? '#1e4d33' : '#bbf0d1';
+  } else if (phase === 'empty') {
+    text = 'No data';
+    dotBg = dark ? '#3a3d44' : '#94a3b8'; dotBorder = dark ? '#6b7280' : '#94a3b8';
+    statusColor = dark ? '#9ca3af' : '#64748b';
+    rowBg = dark ? '#24262b' : '#f8fafc'; rowBorder = dark ? '#3a3d44' : '#e5e7eb';
+  } else if (phase === 'failed') {
+    text = 'Failed';
+    dotBg = '#dc2626'; dotBorder = '#dc2626';
+    statusColor = dark ? '#f87171' : '#b91c1c';
+    rowBg = dark ? '#2a1414' : '#fef2f2'; rowBorder = dark ? '#4a2020' : '#fecaca';
+  }
+
+  dotEl.style.background = dotBg;
+  dotEl.style.borderColor = dotBorder;
+  if (spin) {
+    dotEl.style.borderTopColor = '#E85D04';
+    dotEl.style.borderRightColor = '#E85D04';
+    dotEl.style.animation = 'liveSpin 0.7s linear infinite';
+  } else {
+    dotEl.style.borderTopColor = dotBorder;
+    dotEl.style.borderRightColor = dotBorder;
+    dotEl.style.animation = 'none';
+  }
+
+  statusEl.style.color = statusColor;
+  statusEl.textContent = text;
+
+  rowEl.style.background = rowBg;
+  rowEl.style.borderColor = rowBorder;
+}
+
 function renderBulkLive(progress) {
   const bulk = progress?.active && !progress?.finished ? progress.bulk : null;
   const selectSection = $('bulkSelectSection');
@@ -89,71 +455,91 @@ function renderBulkLive(progress) {
   }
 
   selectSection.style.display = 'none';
-  liveGrid.style.display = 'flex';
+  liveGrid.style.display = 'grid';
 
-  // The backend genuinely polls every still-pending category together each
-  // tick (deliberate - mirrors Meesho's "wait on all at once" efficiency, so
-  // a slow category never blocks a fast one from finishing early). More
-  // than one can legitimately be "In progress" at the same real moment, and
-  // showing that honestly - rather than picking just one to display as
-  // active - is what keeps a fast category (e.g. Payments finishing before
-  // Orders) from appearing to silently skip straight to Done with no
-  // visible in-between state.
   for (const cat of Object.keys(BULK_LIVE_META)) {
     const meta = BULK_LIVE_META[cat];
     const rowEl = $(meta.row);
-    const dotEl = $(meta.dot);
-    const statusEl = $(meta.status);
-    if (!rowEl || !dotEl || !statusEl) continue;
-
+    if (!rowEl) continue;
     const included = bulk.categories.includes(cat);
     rowEl.style.display = included ? 'flex' : 'none';
     if (!included) continue;
+    paintLiveRow(meta, bulk.sub[cat]?.phase);
+  }
+}
 
-    const phase = bulk.sub[cat]?.phase;
-    let text = 'Pending';
-    let dotBg = '#ffffff', dotBorder = '#98a1b0', spin = false;
-    let statusColor = '#9aa0ac';
-    let rowBg = '#ffffff', rowBorder = '#ecedf3';
+// The GST tab's own B2B/B2C pair - same live-row treatment as Bulk, just
+// scoped to at most these two types (`progress.gst` mirrors `progress.bulk`
+// but keyed by type label instead of category name).
+const GST_LIVE_META = {
+  B2B: { row: 'gstLiveB2B', dot: 'gstLiveB2BDot', status: 'gstLiveB2BStatus' },
+  B2C: { row: 'gstLiveB2C', dot: 'gstLiveB2CDot', status: 'gstLiveB2CStatus' },
+};
+function renderGstLive(progress) {
+  const gst = progress?.active && !progress?.finished ? progress.gst : null;
+  const typeSection = $('gstTypeSection');
+  const liveGrid = $('gstLiveGrid');
 
-    if (phase === 'scheduling' || phase === 'polling') {
-      text = 'In progress...';
-      dotBg = 'transparent'; dotBorder = '#ffcb70'; spin = true;
-      statusColor = '#E85D04';
-    } else if (phase === 'ready') {
-      text = 'Done';
-      dotBg = '#16a34a'; dotBorder = '#16a34a';
-      statusColor = '#15803d';
-      rowBg = '#f2fbf6'; rowBorder = '#bbf0d1';
-    } else if (phase === 'failed') {
-      text = 'Failed';
-      dotBg = '#dc2626'; dotBorder = '#dc2626';
-      statusColor = '#b91c1c';
-      rowBg = '#fef2f2'; rowBorder = '#fecaca';
-    }
+  if (!gst) {
+    typeSection.style.display = '';
+    liveGrid.style.display = 'none';
+    return;
+  }
 
-    dotEl.style.background = dotBg;
-    dotEl.style.borderColor = dotBorder;
-    if (spin) {
-      dotEl.style.borderTopColor = '#E85D04';
-      dotEl.style.borderRightColor = '#E85D04';
-      dotEl.style.animation = 'liveSpin 0.7s linear infinite';
-    } else {
-      dotEl.style.borderTopColor = dotBorder;
-      dotEl.style.borderRightColor = dotBorder;
-      dotEl.style.animation = 'none';
-    }
+  typeSection.style.display = 'none';
+  liveGrid.style.display = 'grid';
 
-    statusEl.style.color = statusColor;
-    statusEl.textContent = text;
+  for (const t of Object.keys(GST_LIVE_META)) {
+    const meta = GST_LIVE_META[t];
+    const rowEl = $(meta.row);
+    if (!rowEl) continue;
+    const included = gst.types.includes(t);
+    rowEl.style.display = included ? 'flex' : 'none';
+    if (!included) continue;
+    paintLiveRow(meta, gst.sub[t]?.phase);
+  }
+}
 
-    rowEl.style.background = rowBg;
-    rowEl.style.borderColor = rowBorder;
+// The individual Returns tab's own Standard/FBA pair - runs through the
+// same Bulk engine as the Bulk tab (progress.bulk), so this only lights up
+// when the currently active run was actually scoped to just these two
+// categories (i.e. started from this tab, or from Bulk with only Returns
+// types picked) - a mixed run (e.g. Orders + Returns from the Bulk tab)
+// leaves this tab showing its normal checkbox state instead.
+const RETURNS_LIVE_META = {
+  returns: { row: 'returnsLiveStandard', dot: 'returnsLiveStandardDot', status: 'returnsLiveStandardStatus' },
+  fbaReturns: { row: 'returnsLiveFba', dot: 'returnsLiveFbaDot', status: 'returnsLiveFbaStatus' },
+};
+function renderReturnsLive(progress) {
+  const bulk = progress?.active && !progress?.finished ? progress.bulk : null;
+  const isReturnsOnlyRun = !!bulk && bulk.categories.length > 0 && bulk.categories.every((c) => c === 'returns' || c === 'fbaReturns');
+  const typeSection = $('returnsTypeSection');
+  const liveGrid = $('returnsLiveGrid');
+
+  if (!isReturnsOnlyRun) {
+    typeSection.style.display = '';
+    liveGrid.style.display = 'none';
+    return;
+  }
+
+  typeSection.style.display = 'none';
+  liveGrid.style.display = 'grid';
+
+  for (const cat of Object.keys(RETURNS_LIVE_META)) {
+    const meta = RETURNS_LIVE_META[cat];
+    const rowEl = $(meta.row);
+    if (!rowEl) continue;
+    const included = bulk.categories.includes(cat);
+    rowEl.style.display = included ? 'flex' : 'none';
+    if (!included) continue;
+    paintLiveRow(meta, bulk.sub[cat]?.phase);
   }
 }
 
 function render(progress) {
   renderBulkLive(progress);
+  renderGstLive(progress);
+  renderReturnsLive(progress);
   const wrap = $('progress');
   // `active` (not `total`) is the real "is a sync running/just finished"
   // signal - total stays 0 during report generation (before we know whether
@@ -168,6 +554,7 @@ function render(progress) {
     $('syncAds').disabled = false;
     $('syncBulk').disabled = false;
     $('progressActions').style.display = 'none';
+    $('retryFailedBtn').style.display = 'none';
     return;
   }
   wrap.classList.add('show');
@@ -188,6 +575,9 @@ function render(progress) {
   if (!progress.finished) {
     $('progressActions').style.display = 'flex';
     $('pauseResumeLabel').textContent = progress.paused ? 'Resume' : 'Pause';
+    // Still running - clear the "already played" flag so the success
+    // animation is free to play again the next time this run finishes.
+    $('progressDone').dataset.animated = 'false';
   } else {
     $('progressActions').style.display = 'none';
   }
@@ -202,6 +592,7 @@ function render(progress) {
     $('progressError').textContent = progress.error;
     fill.style.width = '100%';
     fill.classList.add('failed');
+    updateRetryButton(progress);
     return;
   }
   $('progressError').style.display = 'none';
@@ -216,6 +607,7 @@ function render(progress) {
     $('progressFailures').style.display = 'none';
     $('progressDone').style.display = 'none';
     fill.classList.add('indeterminate');
+    $('retryFailedBtn').style.display = 'none';
     return;
   }
 
@@ -250,17 +642,93 @@ function render(progress) {
       fill.classList.add('cancelled');
     } else {
       $('progressCount').textContent = `Downloaded ${progress.done} / ${progress.total}`;
-      $('progressDone').textContent = 'Completed';
-      $('progressDone').className = 'progress-done ok';
+      // A brief scale-in pulse the moment this run first reports done, not
+      // replayed on every 800ms re-render of the same already-finished
+      // state (dataset.animated is reset back to 'false' above the instant
+      // a *new* run starts, so it's free to play again next time).
+      const alreadyAnimated = $('progressDone').dataset.animated === 'true';
+      $('progressDone').innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span>Completed</span>';
+      $('progressDone').className = `progress-done ok${alreadyAnimated ? '' : ' pop-in'}`;
+      $('progressDone').dataset.animated = 'true';
       fill.classList.add('success');
     }
+    updateRetryButton(progress);
   }
+}
+
+// Shows "Retry Failed Only" whenever the just-finished run left a `retry`
+// descriptor (set by background.js only when at least one category/type
+// truly failed - schedule/poll-stage or download-stage, either way already
+// resolved back to a real category key there, not just a label or filename).
+// Never shown after a cancel - the user stopped it on purpose, retrying
+// isn't the same action as an actual failure recovery.
+function updateRetryButton(progress) {
+  const btn = $('retryFailedBtn');
+  if (progress?.finished && !progress?.cancelled && progress?.retry) {
+    const n = progress.retry.categories?.length || progress.retry.types?.length || 0;
+    $('retryFailedLabel').textContent = n > 1 ? `Retry ${n} Failed` : 'Retry Failed Only';
+    btn.style.display = 'flex';
+    btn.disabled = false;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+$('retryFailedBtn').addEventListener('click', async () => {
+  let syncProgress;
+  try { ({ syncProgress } = await chrome.storage.local.get('syncProgress')); } catch (_) { return; }
+  const retry = syncProgress?.retry;
+  if (!retry) return;
+
+  $('retryFailedBtn').disabled = true;
+  render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
+  try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
+  // A new, distinctly-named ZIP rather than reusing the original name - the
+  // retry only re-fetches what failed, so it can't just overwrite/merge into
+  // the first ZIP (which already has whatever succeeded the first time).
+  const retryZipName = `${retry.zipName || 'Amazon_Retry'}_Retry`;
+  try {
+    if (retry.type === 'gst') {
+      await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types: retry.types, fromDate: retry.fromDate, toDate: retry.toDate, zipName: retryZipName });
+    } else {
+      await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories: retry.categories, fromDate: retry.fromDate, toDate: retry.toDate, zipName: retryZipName });
+    }
+  } catch (_) {
+    $('retryFailedBtn').disabled = false;
+  }
+});
+
+function relativeTime(ts) {
+  const diffSec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (diffSec < 10) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
+// A single most-recent-run summary, regardless of which tab/engine produced
+// it (see recordLastSync in background.js) - re-rendered on the same 800ms
+// tick as the sync-progress bar so it picks up a just-finished run and its
+// own "Xs/Xm ago" text stays current without needing the popup reopened.
+async function renderLastSync() {
+  let lastSync;
+  try { ({ lastSync } = await chrome.storage.local.get('lastSync')); } catch (_) { return; }
+  const bar = $('lastSyncBar');
+  if (!lastSync) { bar.style.display = 'none'; return; }
+  const failText = lastSync.failed > 0 ? `, ${lastSync.failed} failed` : '';
+  $('lastSyncText').textContent = `Last synced: ${lastSync.label} · ${lastSync.done} file${lastSync.done === 1 ? '' : 's'}${failText} · ${relativeTime(lastSync.at)}`;
+  bar.style.display = 'flex';
 }
 
 async function refresh() {
   let syncProgress;
   try { ({ syncProgress } = await chrome.storage.local.get('syncProgress')); } catch (_) { return; }
   render(syncProgress);
+  renderLastSync();
   return syncProgress;
 }
 
@@ -338,6 +806,14 @@ function clampDateInputs() {
 $('fromDate').addEventListener('change', clampDateInputs);
 $('toDate').addEventListener('change', clampDateInputs);
 
+const ordersDatePicker = createDateRangePicker({
+  idPrefix: 'orders',
+  fromInputId: 'fromDate',
+  toInputId: 'toDate',
+  maxDate: maxSelectableDate,
+  quickRanges: standardQuickRanges(),
+});
+
 $('sync').addEventListener('click', async () => {
   clearFormError();
 
@@ -365,26 +841,55 @@ $('sync').addEventListener('click', async () => {
 });
 
 // ── Tabs: Orders / Returns / Payments / B2B/B2C / Ads / Bulk ────────────────
+let currentTab = 'orders';
+// The 5 report tabs live under a "Reports" group, Bulk is its own group -
+// switching back to "Reports" (after having been on Bulk) should return to
+// whichever report tab was last open, not silently reset to Orders.
+let lastReportsTab = 'orders';
 function selectTab(tab) {
+  currentTab = tab;
+  if (tab !== 'bulk') lastReportsTab = tab;
+
+  const isBulk = tab === 'bulk';
+  $('tabGroupReports').classList.toggle('active', !isBulk);
+  $('tabGroupBulk').classList.toggle('active', isBulk);
+  $('reportsSubTabs').style.display = isBulk ? 'none' : 'flex';
+
   $('tabOrdersBtn').classList.toggle('active', tab === 'orders');
   $('tabReturnsBtn').classList.toggle('active', tab === 'returns');
   $('tabPaymentsBtn').classList.toggle('active', tab === 'payments');
   $('tabGstBtn').classList.toggle('active', tab === 'gst');
   $('tabAdsBtn').classList.toggle('active', tab === 'ads');
-  $('tabBulkBtn').classList.toggle('active', tab === 'bulk');
   $('ordersPanel').classList.toggle('active', tab === 'orders');
   $('returnsPanel').classList.toggle('active', tab === 'returns');
   $('paymentsPanel').classList.toggle('active', tab === 'payments');
   $('gstPanel').classList.toggle('active', tab === 'gst');
   $('adsPanel').classList.toggle('active', tab === 'ads');
   $('bulkPanel').classList.toggle('active', tab === 'bulk');
+  saveUiState();
 }
 $('tabOrdersBtn').addEventListener('click', () => selectTab('orders'));
 $('tabReturnsBtn').addEventListener('click', () => selectTab('returns'));
 $('tabPaymentsBtn').addEventListener('click', () => selectTab('payments'));
 $('tabGstBtn').addEventListener('click', () => selectTab('gst'));
 $('tabAdsBtn').addEventListener('click', () => selectTab('ads'));
-$('tabBulkBtn').addEventListener('click', () => selectTab('bulk'));
+$('tabGroupReports').addEventListener('click', () => selectTab(lastReportsTab));
+$('tabGroupBulk').addEventListener('click', () => selectTab('bulk'));
+
+// Info-tip bubbles already show on hover/focus via CSS alone - this only
+// adds click-to-toggle on top, for touch/keyboard use where there's no
+// hover state to rely on. Clicking elsewhere closes any open bubble.
+document.querySelectorAll('.info-tip').forEach((tip) => {
+  tip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasOpen = tip.classList.contains('open');
+    document.querySelectorAll('.info-tip.open').forEach((t) => t.classList.remove('open'));
+    tip.classList.toggle('open', !wasOpen);
+  });
+});
+document.addEventListener('click', () => {
+  document.querySelectorAll('.info-tip.open').forEach((t) => t.classList.remove('open'));
+});
 
 function showReturnsFormError(msg) {
   const el = $('returnsFormError');
@@ -395,100 +900,94 @@ function clearReturnsFormError() {
   $('returnsFormError').style.display = 'none';
 }
 
+// Standard Returns caps at MAX_RETURNS_RANGE_DAYS and a 2-days-back ceiling;
+// FBA Customer Returns has neither cap. Standard and FBA are independent
+// checkboxes here (not mutually exclusive - both can be requested together
+// in one run through the Bulk engine, see the Sync click handler below), so
+// the shared date picker follows FBA's more permissive ceiling (today), and
+// Standard gets disabled/unchecked automatically for whatever specific
+// range doesn't fit it - same pattern as the Bulk tab's own Returns tile.
+function returnsStandardFits(fromDate, toDate) {
+  return rangeDays(fromDate, toDate) <= MAX_RETURNS_RANGE_DAYS && toDate <= maxReturnsSelectableDate();
+}
+
 function updateReturnsDateConstraints() {
+  const maxDate = maxFbaReturnsSelectableDate();
   const fromEl = $('returnsFromDate');
   const toEl = $('returnsToDate');
-
-  if (isFbaReturnsType()) {
-    const maxDate = maxFbaReturnsSelectableDate();
-    toEl.max = maxDate;
-    toEl.min = fromEl.value || '';
-    fromEl.max = maxDate;
-    fromEl.min = '';
-    return;
-  }
-
-  const maxDate = maxReturnsSelectableDate();
-  toEl.max = fromEl.value ? [addDays(fromEl.value, MAX_RETURNS_RANGE_DAYS - 1), maxDate].sort()[0] : maxDate;
-  toEl.min = fromEl.value || '';
   fromEl.max = maxDate;
-  // No fromEl.min here either - same fix as Orders, for the same reason.
+  toEl.max = maxDate;
+  toEl.min = fromEl.value || '';
+  // No fromEl.min - FBA has no earliest-date floor, and Standard's cap is
+  // enforced via availability graying below, not by blocking the calendar.
+}
+
+function updateReturnsAvailability() {
+  const fromDate = $('returnsFromDate').value;
+  const toDate = $('returnsToDate').value;
+  const standardEl = $('returnsTypeStandard');
+  const standardOk = !fromDate || !toDate || returnsStandardFits(fromDate, toDate);
+  standardEl.disabled = !standardOk;
+  if (!standardOk && standardEl.checked) standardEl.checked = false;
+  $('returnsHelpNote').textContent = standardOk
+    ? "If the right Return Reports page isn't already open, this opens/switches to it automatically."
+    : `Standard Returns is grayed out - it needs a ${MAX_RETURNS_RANGE_DAYS}-day span or less, ending at least 2 days back (FBA Customer Returns has no such limit).`;
 }
 
 function clampReturnsDateInputs() {
+  const maxDate = maxFbaReturnsSelectableDate();
   const fromEl = $('returnsFromDate');
   const toEl = $('returnsToDate');
   const reasons = [];
 
-  if (isFbaReturnsType()) {
-    const maxDate = maxFbaReturnsSelectableDate();
-    if (toEl.value && toEl.value > maxDate) { toEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
-    if (fromEl.value && fromEl.value > maxDate) { fromEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
-    if (fromEl.value && toEl.value && fromEl.value > toEl.value) { fromEl.value = toEl.value; reasons.push("the From date can't be after the To date"); }
-    updateReturnsDateConstraints();
-    if (reasons.length) showReturnsFormError(`Dates adjusted automatically - ${[...new Set(reasons)].join('; ')}.`);
-    return;
-  }
-
-  const maxDate = maxReturnsSelectableDate();
-  if (toEl.value && toEl.value > maxDate) { toEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (2 days ago)`); }
-  if (fromEl.value && fromEl.value > maxDate) { fromEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (2 days ago)`); }
+  if (fromEl.value && fromEl.value > maxDate) { fromEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
+  if (toEl.value && toEl.value > maxDate) { toEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
   if (fromEl.value && toEl.value && fromEl.value > toEl.value) { fromEl.value = toEl.value; reasons.push("the From date can't be after the To date"); }
 
-  if (fromEl.value && toEl.value && rangeDays(fromEl.value, toEl.value) > MAX_RETURNS_RANGE_DAYS) {
-    let newTo = addDays(fromEl.value, MAX_RETURNS_RANGE_DAYS - 1);
-    if (newTo > maxDate) newTo = maxDate;
-    toEl.value = newTo;
-    reasons.push(`Amazon only allows a ${MAX_RETURNS_RANGE_DAYS}-day range per request`);
-  }
-
   updateReturnsDateConstraints();
+  updateReturnsAvailability();
   if (reasons.length) {
     showReturnsFormError(`Dates adjusted automatically - ${[...new Set(reasons)].join('; ')}.`);
   }
 }
 $('returnsFromDate').addEventListener('change', clampReturnsDateInputs);
 $('returnsToDate').addEventListener('change', clampReturnsDateInputs);
+$('returnsTypeStandard').addEventListener('change', updateReturnsAvailability);
+$('returnsTypeFba').addEventListener('change', updateReturnsAvailability);
 
-function updateReturnsTypeUI() {
-  const fba = isFbaReturnsType();
-  $('returnsCardTitle').textContent = fba ? 'FBA Customer Returns Report' : 'All Returns Report';
-  $('returnsCardSub').textContent = fba
-    ? "Pulls the FBA customer returns CSV from Seller Central's Fulfilment Reports and bundles it into one ZIP. No 60-day range limit."
-    : "Pulls TSV return data from Seller Central's Return Reports page and bundles it into one ZIP.";
-  $('returnsHelpNote').textContent = fba
-    ? 'Needs the FBA customer returns report page (Fulfilment Reports → Customer Returns) open in this Seller Central tab.'
-    : 'Needs the Return Reports page (Returns → Return Reports) open in this Seller Central tab.';
-  $('returnsZipName').placeholder = fba ? 'Amazon_FBA_Returns' : 'Amazon_Returns';
-  clampReturnsDateInputs();
-}
-$('returnsTypeStandard').addEventListener('change', updateReturnsTypeUI);
-$('returnsTypeFba').addEventListener('change', updateReturnsTypeUI);
+const returnsDatePicker = createDateRangePicker({
+  idPrefix: 'returns',
+  fromInputId: 'returnsFromDate',
+  toInputId: 'returnsToDate',
+  maxDate: maxFbaReturnsSelectableDate,
+  quickRanges: standardQuickRanges(),
+});
 
 $('syncReturns').addEventListener('click', async () => {
   clearReturnsFormError();
 
-  const fba = isFbaReturnsType();
   const fromDate = $('returnsFromDate').value;
   const toDate = $('returnsToDate').value;
-  const zipName = $('returnsZipName').value.trim() || (fba ? `Amazon_FBA_Returns_${todayStamp()}` : `Amazon_Returns_${todayStamp()}`);
+  const zipName = $('returnsZipName').value.trim() || `Amazon_Returns_${todayStamp()}`;
+  const maxDate = maxFbaReturnsSelectableDate();
 
+  const categories = [];
+  if ($('returnsTypeStandard').checked && !$('returnsTypeStandard').disabled) categories.push('returns');
+  if ($('returnsTypeFba').checked) categories.push('fbaReturns');
+
+  if (!categories.length) { showReturnsFormError('Pick Standard and/or FBA Returns first.'); return; }
   if (!fromDate || !toDate) { showReturnsFormError('Pick a date range first.'); return; }
   if (fromDate > toDate) { showReturnsFormError('From date must be before the To date.'); return; }
-
-  if (fba) {
-    const maxDate = maxFbaReturnsSelectableDate();
-    if (toDate > maxDate) { showReturnsFormError(`The latest selectable date is ${maxDate} (today).`); return; }
-  } else {
-    const maxDate = maxReturnsSelectableDate();
-    if (toDate > maxDate) { showReturnsFormError(`The latest selectable date is ${maxDate} (2 days ago).`); return; }
-    if (rangeDays(fromDate, toDate) > MAX_RETURNS_RANGE_DAYS) { showReturnsFormError(`You can only request up to ${MAX_RETURNS_RANGE_DAYS} days at a time.`); return; }
-  }
+  if (toDate > maxDate) { showReturnsFormError(`The latest selectable date is ${maxDate} (today).`); return; }
 
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: fba ? 'START_FBA_RETURNS_SYNC' : 'START_RETURNS_SYNC', fromDate, toDate, zipName });
+    // The individual Returns tab runs through the same Bulk engine as the
+    // Bulk tab, just scoped to whichever of returns/fbaReturns is checked -
+    // that engine already generalizes to any subset of categories and
+    // already carries the navigation orchestration both of these need.
+    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, zipName });
   } catch (_) {
     $('syncReturns').disabled = false;
   }
@@ -542,6 +1041,14 @@ function clampPaymentsDateInputs() {
 $('paymentsFromDate').addEventListener('change', clampPaymentsDateInputs);
 $('paymentsToDate').addEventListener('change', clampPaymentsDateInputs);
 
+const paymentsDatePicker = createDateRangePicker({
+  idPrefix: 'payments',
+  fromInputId: 'paymentsFromDate',
+  toInputId: 'paymentsToDate',
+  maxDate: maxPaymentsSelectableDate,
+  quickRanges: standardQuickRanges(),
+});
+
 $('syncPayments').addEventListener('click', async () => {
   clearPaymentsFormError();
 
@@ -587,26 +1094,26 @@ function clearGstFormError() {
 }
 
 function updateGstDateConstraints() {
-  const minDate = minGstSelectableDate();
   const maxDate = maxGstSelectableDate();
   const fromEl = $('gstFromDate');
   const toEl = $('gstToDate');
 
-  fromEl.min = minDate;
   fromEl.max = maxDate;
-  toEl.min = fromEl.value || minDate;
+  toEl.min = fromEl.value || '';
   toEl.max = maxDate;
+  // No fromEl.min - GST now has no earliest-date floor in the UI at all.
+  // Amazon's On Demand endpoint itself still only covers the last 45 days,
+  // but background.js auto-falls-back to GST Monthly Reports for anything
+  // older, entirely transparently - so the calendar should never block
+  // navigating to an older month, same as Orders/Returns/Payments.
 }
 
 function clampGstDateInputs() {
-  const minDate = minGstSelectableDate();
   const maxDate = maxGstSelectableDate();
   const fromEl = $('gstFromDate');
   const toEl = $('gstToDate');
   const reasons = [];
 
-  if (fromEl.value && fromEl.value < minDate) { fromEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (45 days back)`); }
-  if (toEl.value && toEl.value < minDate) { toEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (45 days back)`); }
   if (fromEl.value && fromEl.value > maxDate) { fromEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
   if (toEl.value && toEl.value > maxDate) { toEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (today)`); }
   if (fromEl.value && toEl.value && fromEl.value > toEl.value) { fromEl.value = toEl.value; reasons.push("the From date can't be after the To date"); }
@@ -619,26 +1126,52 @@ function clampGstDateInputs() {
 $('gstFromDate').addEventListener('change', clampGstDateInputs);
 $('gstToDate').addEventListener('change', clampGstDateInputs);
 
+// GST's ceiling is still anchored to today (no 2-days-back cutoff, same as
+// always), but the 45-day floor is no longer enforced in the UI - any older
+// range is handled transparently by background.js falling back to GST
+// Monthly Reports instead of On Demand, invisibly to the user (per direct
+// instruction: never expose which source a given range actually used).
+const gstDatePicker = createDateRangePicker({
+  idPrefix: 'gst',
+  fromInputId: 'gstFromDate',
+  toInputId: 'gstToDate',
+  maxDate: maxGstSelectableDate,
+  quickRanges: [
+    {
+      key: 'last45', label: `Last ${MAX_GST_LOOKBACK_DAYS} Days`,
+      compute: (mx) => ({ start: parseIsoDate(minGstSelectableDate()), end: mx }),
+    },
+    {
+      key: 'last30', label: 'Last 30 Days',
+      compute: (mx) => ({ start: calAddDays(mx, -29), end: mx }),
+    },
+    {
+      key: 'thisMonth', label: 'This Month',
+      compute: (mx) => ({ start: new Date(mx.getFullYear(), mx.getMonth(), 1), end: mx }),
+    },
+  ],
+});
+
 $('syncGst').addEventListener('click', async () => {
   clearGstFormError();
 
   const fromDate = $('gstFromDate').value;
   const toDate = $('gstToDate').value;
   const zipName = $('gstZipName').value.trim() || `Amazon_GST_${todayStamp()}`;
-  const reportType = $('gstTypeB2B').checked ? $('gstTypeB2B').value : $('gstTypeB2C').value;
-  const label = $('gstTypeB2B').checked ? 'B2B' : 'B2C';
+  const types = [];
+  if ($('gstTypeB2B').checked) types.push('B2B');
+  if ($('gstTypeB2C').checked) types.push('B2C');
 
-  const minDate = minGstSelectableDate();
   const maxDate = maxGstSelectableDate();
+  if (!types.length) { showGstFormError('Pick B2B and/or B2C first.'); return; }
   if (!fromDate || !toDate) { showGstFormError('Pick a date range first.'); return; }
   if (fromDate > toDate) { showGstFormError('From date must be before the To date.'); return; }
-  if (fromDate < minDate) { showGstFormError(`The earliest selectable date is ${minDate} (45 days back).`); return; }
   if (toDate > maxDate) { showGstFormError(`The latest selectable date is ${maxDate} (today).`); return; }
 
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', reportType, label, fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types, fromDate, toDate, zipName });
   } catch (_) {
     $('syncGst').disabled = false;
   }
@@ -705,6 +1238,35 @@ function clampAdsDateInputs() {
 $('adsFromDate').addEventListener('change', clampAdsDateInputs);
 $('adsToDate').addEventListener('change', clampAdsDateInputs);
 
+// Ads' floor and ceiling are anchored independently (floor from raw today,
+// ceiling from today-2 - see minAdsSelectableDate/maxAdsSelectableDate), so
+// like GST it gets its own quick ranges instead of standardQuickRanges().
+const adsDatePicker = createDateRangePicker({
+  idPrefix: 'ads',
+  fromInputId: 'adsFromDate',
+  toInputId: 'adsToDate',
+  maxDate: maxAdsSelectableDate,
+  minDate: minAdsSelectableDate,
+  quickRanges: [
+    {
+      key: 'maxRange', label: 'Max Range',
+      compute: (mx) => ({ start: parseIsoDate(minAdsSelectableDate()), end: mx }),
+    },
+    {
+      key: 'last30', label: 'Last 30 Days',
+      compute: (mx) => ({ start: calAddDays(mx, -29), end: mx }),
+    },
+    {
+      key: 'thisMonth', label: 'This Month',
+      compute: (mx) => {
+        const floor = parseIsoDate(minAdsSelectableDate());
+        const start = new Date(mx.getFullYear(), mx.getMonth(), 1);
+        return { start: start < floor ? floor : start, end: mx };
+      },
+    },
+  ],
+});
+
 $('syncAds').addEventListener('click', async () => {
   clearAdsFormError();
 
@@ -736,13 +1298,13 @@ $('syncAds').addEventListener('click', async () => {
 //
 // The shared range's own ceiling is already the same "today - 2 days" cutoff
 // Orders/Payments/GST each use individually, so Payments never needs to be
-// grayed out here - only Orders (30-day span cap) and B2B/B2C (45-day
-// lookback floor) can actually fall outside whatever range is picked.
+// grayed out here - only Orders (30-day span cap) can actually fall outside
+// whatever range is picked. B2B/B2C used to have a 45-day lookback floor
+// here too, but that's now handled entirely transparently by background.js
+// (falls back to GST Monthly Reports for anything older than 45 days), so
+// GST is never grayed out for range reasons any more either.
 function bulkOrdersFits(fromDate, toDate) {
   return rangeDays(fromDate, toDate) <= MAX_RANGE_DAYS;
-}
-function bulkGstFits(fromDate) {
-  return fromDate >= minGstSelectableDate();
 }
 // Standard Returns caps at MAX_RETURNS_RANGE_DAYS; FBA Customer Returns has
 // no span cap at all (confirmed live - see maxFbaReturnsSelectableDate above).
@@ -800,15 +1362,14 @@ function updateBulkAvailability() {
   if (!ordersOk) { ordersEl.checked = false; reasons.push(`Orders needs a ${MAX_RANGE_DAYS}-day span or less`); }
   syncDsCardVisual($('bulkOrdersCard'), ordersEl);
 
-  const gstOk = !fromDate || bulkGstFits(fromDate);
-  gstEl.disabled = !gstOk;
-  if (!gstOk) { gstEl.checked = false; reasons.push(`B2B/B2C only supports the last ${MAX_GST_LOOKBACK_DAYS} days`); }
   syncDsCardVisual($('bulkGstCard'), gstEl);
 
   // FBA Customer Returns has no range cap, so Returns as a category is never
-  // grayed out for range reasons - only the Standard option can fall outside
-  // the picked range, and if it does while selected, fall back to FBA
-  // automatically rather than disabling the whole tile out from under the user.
+  // grayed out for range reasons - only the Standard checkbox can fall
+  // outside the picked range. Standard and FBA are independent checkboxes
+  // (not mutually exclusive) so both can be requested together in one run -
+  // only Standard gets disabled/unchecked when it doesn't fit; FBA's own
+  // checked state is left alone either way.
   const standardFits = !fromDate || !toDate || bulkStandardReturnsFits(fromDate, toDate);
   const standardTypeEl = $('bulkReturnsTypeStandard');
   const fbaTypeEl = $('bulkReturnsTypeFba');
@@ -816,8 +1377,7 @@ function updateBulkAvailability() {
   fbaTypeEl.disabled = !returnsEl.checked;
   if (!standardFits && standardTypeEl.checked) {
     standardTypeEl.checked = false;
-    fbaTypeEl.checked = true;
-    reasons.push(`Standard Returns needs a ${MAX_RETURNS_RANGE_DAYS}-day span or less, so switched to FBA Customer Returns for this range`);
+    reasons.push(`Standard Returns needs a ${MAX_RETURNS_RANGE_DAYS}-day span or less`);
   }
   syncDsCardVisual($('bulkReturnsCard'), returnsEl);
 
@@ -852,6 +1412,37 @@ function clampBulkDateInputs() {
 }
 $('bulkFromDate').addEventListener('change', clampBulkDateInputs);
 $('bulkToDate').addEventListener('change', clampBulkDateInputs);
+
+// Meesho-style chips + month calendar in place of the native date inputs
+// (which stay in the DOM, hidden, as the actual backing state - see
+// createDateRangePicker's own comment). Quick ranges are anchored on
+// maxSelectableDate() (today - 2, the real ceiling) rather than raw today,
+// matching Orders/Payments/GST's own 2-days-back generation-delay cutoff.
+const bulkDatePicker = createDateRangePicker({
+  idPrefix: 'bulk',
+  fromInputId: 'bulkFromDate',
+  toInputId: 'bulkToDate',
+  maxDate: maxSelectableDate,
+  quickRanges: [
+    {
+      key: 'thisMonth', label: 'This Month',
+      compute: (mx) => ({ start: new Date(mx.getFullYear(), mx.getMonth(), 1), end: mx }),
+    },
+    {
+      key: 'lastMonth', label: 'Last Month',
+      compute: (mx) => {
+        const firstThis = new Date(mx.getFullYear(), mx.getMonth(), 1);
+        const end = calAddDays(firstThis, -1);
+        return { start: new Date(end.getFullYear(), end.getMonth(), 1), end };
+      },
+    },
+    {
+      key: 'last30', label: 'Last 30 Days',
+      compute: (mx) => ({ start: calAddDays(mx, -29), end: mx }),
+    },
+  ],
+});
+
 $('bulkOrders').addEventListener('change', () => syncDsCardVisual($('bulkOrdersCard'), $('bulkOrders')));
 $('bulkPayments').addEventListener('change', () => syncDsCardVisual($('bulkPaymentsCard'), $('bulkPayments')));
 $('bulkGst').addEventListener('change', () => {
@@ -878,20 +1469,23 @@ $('syncBulk').addEventListener('click', async () => {
   const categories = [];
   if ($('bulkOrders').checked && !$('bulkOrders').disabled) categories.push('orders');
   if ($('bulkPayments').checked) categories.push('payments');
-  if ($('bulkGst').checked && !$('bulkGst').disabled) categories.push('gst');
+  if ($('bulkGst').checked && !$('bulkGst').disabled) {
+    if ($('bulkGstTypeB2B').checked) categories.push('gstB2B');
+    if ($('bulkGstTypeB2C').checked) categories.push('gstB2C');
+    if (!$('bulkGstTypeB2B').checked && !$('bulkGstTypeB2C').checked) { showBulkFormError('Pick B2B and/or B2C, or uncheck B2B/B2C entirely.'); return; }
+  }
   if ($('bulkReturns').checked && !$('bulkReturns').disabled) {
-    categories.push($('bulkReturnsTypeFba').checked ? 'fbaReturns' : 'returns');
+    if ($('bulkReturnsTypeStandard').checked) categories.push('returns');
+    if ($('bulkReturnsTypeFba').checked) categories.push('fbaReturns');
+    if (!$('bulkReturnsTypeStandard').checked && !$('bulkReturnsTypeFba').checked) { showBulkFormError('Pick Standard and/or FBA Returns, or uncheck Returns entirely.'); return; }
   }
 
   if (!categories.length) { showBulkFormError('Pick at least one report type.'); return; }
 
-  const gstReportType = $('bulkGstTypeB2B').checked ? $('bulkGstTypeB2B').value : $('bulkGstTypeB2C').value;
-  const gstLabel = $('bulkGstTypeB2B').checked ? 'B2B' : 'B2C';
-
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, gstReportType, gstLabel, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, zipName });
   } catch (_) {
     $('syncBulk').disabled = false;
   }
@@ -908,60 +1502,150 @@ $('cancelBtn').addEventListener('click', async () => {
   try { await chrome.runtime.sendMessage({ type: 'CANCEL_SYNC' }); } catch (_) {}
 });
 
+// Reopening the popup used to always land back on the Orders tab with fresh
+// default dates/checkboxes, even seconds after picking something specific -
+// this remembers the last tab and every panel's own date range/report-type
+// selections across opens (chrome.storage.local, not tied to any one sync
+// run) and restores them on the next open, falling back to today's usual
+// computed defaults wherever nothing was saved yet. A saved date that's
+// since aged out of range still gets caught and corrected by each panel's
+// own existing clamp function, called right after restoring here - restoring
+// stale state was never a validity risk, only a convenience one.
+async function loadUiState() {
+  try {
+    const { uiState } = await chrome.storage.local.get('uiState');
+    return uiState || {};
+  } catch (_) {
+    return {};
+  }
+}
+function pick(saved, fallback) {
+  return saved === undefined || saved === null || saved === '' ? fallback : saved;
+}
+async function saveUiState() {
+  try {
+    await chrome.storage.local.set({
+      uiState: {
+        lastTab: currentTab,
+        orders: { from: $('fromDate').value, to: $('toDate').value },
+        returns: {
+          from: $('returnsFromDate').value, to: $('returnsToDate').value,
+          standard: $('returnsTypeStandard').checked, fba: $('returnsTypeFba').checked,
+        },
+        payments: { from: $('paymentsFromDate').value, to: $('paymentsToDate').value },
+        gst: {
+          from: $('gstFromDate').value, to: $('gstToDate').value,
+          b2b: $('gstTypeB2B').checked, b2c: $('gstTypeB2C').checked,
+        },
+        ads: { from: $('adsFromDate').value, to: $('adsToDate').value },
+        bulk: {
+          from: $('bulkFromDate').value, to: $('bulkToDate').value,
+          orders: $('bulkOrders').checked, payments: $('bulkPayments').checked,
+          gst: $('bulkGst').checked, gstB2B: $('bulkGstTypeB2B').checked, gstB2C: $('bulkGstTypeB2C').checked,
+          returns: $('bulkReturns').checked, returnsStandard: $('bulkReturnsTypeStandard').checked, returnsFba: $('bulkReturnsTypeFba').checked,
+        },
+      },
+    });
+  } catch (_) {}
+}
+// Fires on every date/checkbox change across all 6 panels - cheap (just a
+// storage.local write) and simpler than instrumenting every individual
+// input's own change handler separately.
+document.addEventListener('change', (e) => {
+  if (e.target.matches('input[type="date"], input[type="checkbox"]')) saveUiState();
+});
+
 async function initMainApp() {
+  const saved = await loadUiState();
+
   const maxDate = maxSelectableDate();
   const past = new Date();
   past.setDate(past.getDate() - 8); // last 7 days back from maxSelectableDate, inclusive
-  $('fromDate').value = isoDate(past);
-  $('toDate').value = maxDate;
+  $('fromDate').value = pick(saved.orders?.from, isoDate(past));
+  $('toDate').value = pick(saved.orders?.to, maxDate);
   updateDateConstraints();
+  ordersDatePicker.refresh();
   $('zipName').value = `Amazon_Orders_${todayStamp()}`;
 
   const returnsMaxDate = maxReturnsSelectableDate();
   const returnsPast = new Date();
   returnsPast.setDate(returnsPast.getDate() - 8); // last 7 days back from maxReturnsSelectableDate, inclusive
-  $('returnsFromDate').value = isoDate(returnsPast);
-  $('returnsToDate').value = returnsMaxDate;
-  updateReturnsTypeUI();
+  $('returnsFromDate').value = pick(saved.returns?.from, isoDate(returnsPast));
+  $('returnsToDate').value = pick(saved.returns?.to, returnsMaxDate);
+  if (saved.returns) {
+    $('returnsTypeStandard').checked = saved.returns.standard !== false;
+    $('returnsTypeFba').checked = saved.returns.fba !== false;
+  }
+  updateReturnsDateConstraints();
+  updateReturnsAvailability();
+  returnsDatePicker.refresh();
   $('returnsZipName').value = `Amazon_Returns_${todayStamp()}`;
 
   const paymentsMaxDate = maxPaymentsSelectableDate();
   const paymentsPast = new Date();
   paymentsPast.setDate(paymentsPast.getDate() - 8); // last 7 days back from maxPaymentsSelectableDate, inclusive
-  $('paymentsFromDate').value = isoDate(paymentsPast);
-  $('paymentsToDate').value = paymentsMaxDate;
+  $('paymentsFromDate').value = pick(saved.payments?.from, isoDate(paymentsPast));
+  $('paymentsToDate').value = pick(saved.payments?.to, paymentsMaxDate);
   updatePaymentsDateConstraints();
+  paymentsDatePicker.refresh();
   $('paymentsZipName').value = `Amazon_Payments_${todayStamp()}`;
 
   const gstMaxDate = maxGstSelectableDate();
   const gstMinDate = minGstSelectableDate();
-  $('gstFromDate').value = gstMinDate;
-  $('gstToDate').value = gstMaxDate;
+  $('gstFromDate').value = pick(saved.gst?.from, gstMinDate);
+  $('gstToDate').value = pick(saved.gst?.to, gstMaxDate);
+  if (saved.gst) {
+    $('gstTypeB2B').checked = saved.gst.b2b !== false;
+    $('gstTypeB2C').checked = saved.gst.b2c !== false;
+  }
   updateGstDateConstraints();
+  gstDatePicker.refresh();
   $('gstZipName').value = `Amazon_GST_${todayStamp()}`;
 
   const adsMaxDate = maxAdsSelectableDate();
   const adsMinDate = minAdsSelectableDate();
-  $('adsFromDate').value = adsMinDate;
-  $('adsToDate').value = adsMaxDate;
+  $('adsFromDate').value = pick(saved.ads?.from, adsMinDate);
+  $('adsToDate').value = pick(saved.ads?.to, adsMaxDate);
   updateAdsDateConstraints();
+  adsDatePicker.refresh();
   $('adsZipName').value = `Amazon_Ads_${todayStamp()}`;
 
   const bulkMaxDate = maxSelectableDate();
   const bulkPast = new Date();
   bulkPast.setDate(bulkPast.getDate() - 8); // last 7 days back from bulkMaxDate, inclusive - fits Orders/GST both by default
-  $('bulkFromDate').value = isoDate(bulkPast);
-  $('bulkToDate').value = bulkMaxDate;
+  $('bulkFromDate').value = pick(saved.bulk?.from, isoDate(bulkPast));
+  $('bulkToDate').value = pick(saved.bulk?.to, bulkMaxDate);
+  if (saved.bulk) {
+    $('bulkOrders').checked = saved.bulk.orders !== false;
+    $('bulkPayments').checked = saved.bulk.payments !== false;
+    $('bulkGst').checked = saved.bulk.gst !== false;
+    $('bulkGstTypeB2B').checked = saved.bulk.gstB2B !== false;
+    $('bulkGstTypeB2C').checked = saved.bulk.gstB2C !== false;
+    $('bulkReturns').checked = saved.bulk.returns !== false;
+    $('bulkReturnsTypeStandard').checked = saved.bulk.returnsStandard !== false;
+    $('bulkReturnsTypeFba').checked = saved.bulk.returnsFba !== false;
+    syncDsCardVisual($('bulkOrdersCard'), $('bulkOrders'));
+    syncDsCardVisual($('bulkPaymentsCard'), $('bulkPayments'));
+    syncDsCardVisual($('bulkGstCard'), $('bulkGst'));
+    syncDsCardVisual($('bulkReturnsCard'), $('bulkReturns'));
+  }
   updateBulkDateConstraints();
   updateBulkAvailability();
+  bulkDatePicker.refresh();
   $('bulkZipName').value = `Amazon_Bulk_${todayStamp()}`;
+
+  const validTabs = ['orders', 'returns', 'payments', 'gst', 'ads', 'bulk'];
+  selectTab(validTabs.includes(saved.lastTab) ? saved.lastTab : 'orders');
 
   // A finished result (success or error) from a previous session should never
   // resurface just because the popup was reopened - only an in-progress sync
   // (finished === false) is worth showing on open.
   try {
     const { syncProgress } = await chrome.storage.local.get('syncProgress');
-    if (syncProgress?.finished) await chrome.storage.local.remove('syncProgress');
+    if (syncProgress?.finished) {
+      await chrome.storage.local.remove('syncProgress');
+      chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
+    }
   } catch (_) {}
 
   await refresh();
