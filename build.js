@@ -222,6 +222,17 @@ for (const f of ['se_shim.js', 'router.js', 'panel_chrome.js', 'chooser.html', '
   console.log(`  ${f}`.padEnd(26) + 'copied');
 }
 
+// The chooser's marketplace list shows each marketplace's own official icon
+// (sourced from its own site) rather than a generic glyph, so the row is
+// recognisable at a glance instead of relying on the name text alone.
+const brandIconsSrc = path.join(SHELL, 'brand-icons');
+const brandIconNames = fs.readdirSync(brandIconsSrc).sort();
+fs.mkdirSync(path.join(DIST, 'brand-icons'), { recursive: true });
+for (const name of brandIconNames) {
+  fs.copyFileSync(path.join(brandIconsSrc, name), path.join(DIST, 'brand-icons', name));
+}
+console.log('  brand-icons/'.padEnd(26) + `copied (${brandIconNames.join(', ')})`);
+
 // --- Service worker entry ----------------------------------------------------
 // importScripts() is synchronous, so ordering is guaranteed: the shim must
 // exist before any wrapped background calls __seShim, and JSZip must be on the

@@ -9,7 +9,7 @@
     "https://storage.googleapis.com/*",
     "https://ltl.sh/*",
     "https://www.ltl.sh/*",
-    "https://speedecomsolution.com/*"
+    "https://speedecomsolution.in/*"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {

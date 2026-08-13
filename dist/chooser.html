@@ -65,11 +65,9 @@
     .row-mark {
       width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0;
       display: flex; align-items: center; justify-content: center;
-      font-size: 12px; font-weight: 700; color: #fff;
+      background: #fff; border: 1px solid #e5e7eb; overflow: hidden;
     }
-    .row-mark.amazon { background: #f59e0b; }
-    .row-mark.meesho { background: #ec4899; }
-    .row-mark.myntra { background: #6366f1; }
+    .row-mark img { width: 100%; height: 100%; object-fit: contain; }
     .row-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     .row-name { font-size: 12.5px; font-weight: 600; }
     .row-status {
@@ -107,6 +105,18 @@
       background: #fff;
     }
     .login-input:focus { outline: none; border-color: #0f172a; box-shadow: 0 0 0 3px rgba(15,23,42,.08); }
+    .login-field { position: relative; }
+    .login-field.password .login-input { padding-right: 34px; }
+    .pw-toggle {
+      position: absolute; top: 0; right: 0; bottom: 0;
+      width: 32px; border: 0; background: transparent;
+      color: #9ca3af; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .pw-toggle:hover { color: #0f172a; }
+    .pw-toggle .eye-off { display: none; }
+    .pw-toggle.showing .eye { display: none; }
+    .pw-toggle.showing .eye-off { display: block; }
     .login-btn {
       width: 100%; margin-top: 12px;
       padding: 10px; border: 0; border-radius: 7px;
@@ -148,7 +158,13 @@
     <div class="login-title">Sign in to Speed Ecom</div>
     <div class="login-intro">One account for Amazon, Meesho and Myntra.</div>
     <input class="login-input" type="email" id="seLoginEmail" placeholder="Email address" autocomplete="username" />
-    <input class="login-input" type="password" id="seLoginPassword" placeholder="Password" autocomplete="current-password" />
+    <div class="login-field password">
+      <input class="login-input" type="password" id="seLoginPassword" placeholder="Password" autocomplete="current-password" />
+      <button class="pw-toggle" id="sePwToggle" type="button" title="Show password" aria-label="Show password">
+        <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61C3.35 8.36 1 12 1 12s4 8 11 8a9.26 9.26 0 0 0 5.39-1.61M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
     <button class="login-btn" id="seLoginBtn">Sign in</button>
     <div class="login-error" id="seLoginError"></div>
     <div class="login-foot">Signing in unlocks every marketplace panel.</div>

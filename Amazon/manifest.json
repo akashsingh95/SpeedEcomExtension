@@ -7,7 +7,7 @@
   "host_permissions": [
     "https://sellercentral.amazon.in/*",
     "https://advertising.amazon.in/*",
-    "https://speedecomsolution.com/*"
+    "https://speedecomsolution.in/*"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {

@@ -12,7 +12,7 @@ const TAG = '[meesho-sync:bg]';
 // POST login (email + encrypted password) -> GET profile with the bearer
 // token. The token is cached in chrome.storage.local indefinitely; nothing in
 // this file ever clears it automatically, so a signed-in user stays signed in.
-const AUTH_ORIGIN = 'https://speedecomsolution.com';
+const AUTH_ORIGIN = 'https://speedecomsolution.in';
 
 // Production's CORS check rejects requests whose Origin isn't its own web
 // app (the extension's real origin is chrome-extension://<id>, which is not
@@ -169,12 +169,41 @@ function assertNotAborted(tabId) {
   if (abortedTabs.has(tabId)) throw new Error('Sync stopped (tab closed or reloaded).');
 }
 
+// Toolbar-icon badge - lets a running/finished sync be noticed without having
+// the popup open at all. Same scheme as Amazon's: a yellow/orange dot while
+// busy, a green check on completion (including a partial "warn" completion -
+// the ZIP still came out, same as Amazon not distinguishing a run with some
+// failed files from a clean one), a red ! on an outright failure. Badge text
+// stays put after a sync finishes until the popup is reopened and
+// acknowledges it (see the CLEAR_BADGE message, sent from popup.js).
+async function updateBadge(status) {
+  try {
+    if (!status) {
+      await chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+    if (status.ok === null) {
+      await chrome.action.setBadgeText({ text: '•' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#FF9900' });
+      return;
+    }
+    if (status.ok === false) {
+      await chrome.action.setBadgeText({ text: '!' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+      return;
+    }
+    await chrome.action.setBadgeText({ text: '✓' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#16a34a' });
+  } catch (_) {}
+}
+
 async function setStatus(status) {
   try {
     await chrome.storage.local.set({ lastStatus: { ...status, at: new Date().toISOString() } });
   } catch (_) {
     /* storage unavailable — ignore */
   }
+  await updateBadge(status);
 }
 
 // ── Sync orchestration (moved here from content.js) ─────────────────────────
@@ -1692,6 +1721,12 @@ async function buildAndDownloadZip(payload, syncStartedAt) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CLEAR_BADGE') {
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg?.type === 'GET_HISTORY') {
     (async () => {
       const history = await pruneHistory();

@@ -8,7 +8,7 @@
     "https://partners.myntrainfo.com/*",
     "https://partnersapi.myntrainfo.com/*",
     "https://analyticsfereportci.blob.core.windows.net/*",
-    "https://speedecomsolution.com/*"
+    "https://speedecomsolution.in/*"
   ],
   "background": { "service_worker": "background.js" },
   "icons": {

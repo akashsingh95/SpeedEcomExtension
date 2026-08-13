@@ -683,15 +683,14 @@ $('retryFailedBtn').addEventListener('click', async () => {
   $('retryFailedBtn').disabled = true;
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
-  // A new, distinctly-named ZIP rather than reusing the original name - the
-  // retry only re-fetches what failed, so it can't just overwrite/merge into
-  // the first ZIP (which already has whatever succeeded the first time).
-  const retryZipName = `${retry.zipName || 'Amazon_Retry'}_Retry`;
   try {
+    // isRetry: true so background.js suffixes the ZIP name with "_Retry" - the
+    // retry only re-fetches what failed, so it can't just overwrite/merge into
+    // the first ZIP (which already has whatever succeeded the first time).
     if (retry.type === 'gst') {
-      await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types: retry.types, fromDate: retry.fromDate, toDate: retry.toDate, zipName: retryZipName });
+      await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types: retry.types, fromDate: retry.fromDate, toDate: retry.toDate, isRetry: true });
     } else {
-      await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories: retry.categories, fromDate: retry.fromDate, toDate: retry.toDate, zipName: retryZipName });
+      await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories: retry.categories, fromDate: retry.fromDate, toDate: retry.toDate, label: retry.label || 'Bulk', isRetry: true });
     }
   } catch (_) {
     $('retryFailedBtn').disabled = false;
@@ -819,7 +818,6 @@ $('sync').addEventListener('click', async () => {
 
   const fromDate = $('fromDate').value;
   const toDate = $('toDate').value;
-  const zipName = $('zipName').value.trim() || `Amazon_Orders_${todayStamp()}`;
 
   const maxDate = maxSelectableDate();
   if (!fromDate || !toDate) { showFormError('Pick a date range first.'); return; }
@@ -834,7 +832,7 @@ $('sync').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_ORDER_SYNC', fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_ORDER_SYNC', fromDate, toDate });
   } catch (_) {
     $('sync').disabled = false;
   }
@@ -968,7 +966,6 @@ $('syncReturns').addEventListener('click', async () => {
 
   const fromDate = $('returnsFromDate').value;
   const toDate = $('returnsToDate').value;
-  const zipName = $('returnsZipName').value.trim() || `Amazon_Returns_${todayStamp()}`;
   const maxDate = maxFbaReturnsSelectableDate();
 
   const categories = [];
@@ -987,7 +984,7 @@ $('syncReturns').addEventListener('click', async () => {
     // Bulk tab, just scoped to whichever of returns/fbaReturns is checked -
     // that engine already generalizes to any subset of categories and
     // already carries the navigation orchestration both of these need.
-    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, label: 'Returns' });
   } catch (_) {
     $('syncReturns').disabled = false;
   }
@@ -1054,7 +1051,6 @@ $('syncPayments').addEventListener('click', async () => {
 
   const fromDate = $('paymentsFromDate').value;
   const toDate = $('paymentsToDate').value;
-  const zipName = $('paymentsZipName').value.trim() || `Amazon_Payments_${todayStamp()}`;
 
   const maxDate = maxPaymentsSelectableDate();
   if (!fromDate || !toDate) { showPaymentsFormError('Pick a date range first.'); return; }
@@ -1064,7 +1060,7 @@ $('syncPayments').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_PAYMENTS_SYNC', fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_PAYMENTS_SYNC', fromDate, toDate });
   } catch (_) {
     $('syncPayments').disabled = false;
   }
@@ -1157,7 +1153,6 @@ $('syncGst').addEventListener('click', async () => {
 
   const fromDate = $('gstFromDate').value;
   const toDate = $('gstToDate').value;
-  const zipName = $('gstZipName').value.trim() || `Amazon_GST_${todayStamp()}`;
   const types = [];
   if ($('gstTypeB2B').checked) types.push('B2B');
   if ($('gstTypeB2C').checked) types.push('B2C');
@@ -1171,7 +1166,7 @@ $('syncGst').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types, fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_GST_SYNC', types, fromDate, toDate });
   } catch (_) {
     $('syncGst').disabled = false;
   }
@@ -1272,7 +1267,6 @@ $('syncAds').addEventListener('click', async () => {
 
   const fromDate = $('adsFromDate').value;
   const toDate = $('adsToDate').value;
-  const zipName = $('adsZipName').value.trim() || `Amazon_Ads_${todayStamp()}`;
 
   const minDate = minAdsSelectableDate();
   const maxDate = maxAdsSelectableDate();
@@ -1284,7 +1278,7 @@ $('syncAds').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_ADS_SYNC', fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_ADS_SYNC', fromDate, toDate });
   } catch (_) {
     $('syncAds').disabled = false;
   }
@@ -1459,7 +1453,6 @@ $('syncBulk').addEventListener('click', async () => {
 
   const fromDate = $('bulkFromDate').value;
   const toDate = $('bulkToDate').value;
-  const zipName = $('bulkZipName').value.trim() || `Amazon_Bulk_${todayStamp()}`;
   const maxDate = maxSelectableDate();
 
   if (!fromDate || !toDate) { showBulkFormError('Pick a date range first.'); return; }
@@ -1485,7 +1478,7 @@ $('syncBulk').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_BULK_SYNC', categories, fromDate, toDate, label: 'Bulk' });
   } catch (_) {
     $('syncBulk').disabled = false;
   }
@@ -1565,7 +1558,6 @@ async function initMainApp() {
   $('toDate').value = pick(saved.orders?.to, maxDate);
   updateDateConstraints();
   ordersDatePicker.refresh();
-  $('zipName').value = `Amazon_Orders_${todayStamp()}`;
 
   const returnsMaxDate = maxReturnsSelectableDate();
   const returnsPast = new Date();
@@ -1579,7 +1571,6 @@ async function initMainApp() {
   updateReturnsDateConstraints();
   updateReturnsAvailability();
   returnsDatePicker.refresh();
-  $('returnsZipName').value = `Amazon_Returns_${todayStamp()}`;
 
   const paymentsMaxDate = maxPaymentsSelectableDate();
   const paymentsPast = new Date();
@@ -1588,7 +1579,6 @@ async function initMainApp() {
   $('paymentsToDate').value = pick(saved.payments?.to, paymentsMaxDate);
   updatePaymentsDateConstraints();
   paymentsDatePicker.refresh();
-  $('paymentsZipName').value = `Amazon_Payments_${todayStamp()}`;
 
   const gstMaxDate = maxGstSelectableDate();
   const gstMinDate = minGstSelectableDate();
@@ -1600,7 +1590,6 @@ async function initMainApp() {
   }
   updateGstDateConstraints();
   gstDatePicker.refresh();
-  $('gstZipName').value = `Amazon_GST_${todayStamp()}`;
 
   const adsMaxDate = maxAdsSelectableDate();
   const adsMinDate = minAdsSelectableDate();
@@ -1608,7 +1597,6 @@ async function initMainApp() {
   $('adsToDate').value = pick(saved.ads?.to, adsMaxDate);
   updateAdsDateConstraints();
   adsDatePicker.refresh();
-  $('adsZipName').value = `Amazon_Ads_${todayStamp()}`;
 
   const bulkMaxDate = maxSelectableDate();
   const bulkPast = new Date();
@@ -1632,7 +1620,6 @@ async function initMainApp() {
   updateBulkDateConstraints();
   updateBulkAvailability();
   bulkDatePicker.refresh();
-  $('bulkZipName').value = `Amazon_Bulk_${todayStamp()}`;
 
   const validTabs = ['orders', 'returns', 'payments', 'gst', 'ads', 'bulk'];
   selectTab(validTabs.includes(saved.lastTab) ? saved.lastTab : 'orders');

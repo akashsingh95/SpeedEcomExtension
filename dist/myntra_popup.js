@@ -168,7 +168,10 @@ async function initMainApp() {
   // (finished === false) is worth showing on open.
   try {
     const { syncProgress } = await chrome.storage.local.get('syncProgress');
-    if (syncProgress?.finished) await chrome.storage.local.remove('syncProgress');
+    if (syncProgress?.finished) {
+      await chrome.storage.local.remove('syncProgress');
+      chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
+    }
   } catch (_) {}
 
   await refresh();

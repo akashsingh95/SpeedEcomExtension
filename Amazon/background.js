@@ -18,7 +18,7 @@ const TICK_INTERVAL_MINUTES = 0.5;   // Chrome's own alarm floor - matches the o
 // (PEM) -> RSA-OAEP/SHA-1 encrypt the password -> POST login (email +
 // encrypted password) -> GET profile with the bearer token. Token is cached
 // in chrome.storage.local indefinitely - nothing here clears it automatically.
-const AUTH_ORIGIN = 'https://speedecomsolution.com';
+const AUTH_ORIGIN = 'https://speedecomsolution.in';
 
 // Production's CORS check rejects requests whose Origin isn't its own web
 // app (the extension's real origin, chrome-extension://<id>, isn't on that
@@ -687,13 +687,41 @@ async function releaseNavTab(job) {
   job.navTabFor = null;
 }
 
-function safeZipName(s) {
+// Sanitizes a single name component (the tenant/business name) the same way
+// Meesho's safeName() does, so the two marketplaces' ZIP filenames follow one
+// consistent pattern: "<Marketplace>_<Type>_<Shop>_<from>_to_<to>.zip".
+function safeName(s) {
   return (
-    String(s || 'Amazon_Orders')
-      .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
+    String(s || 'Seller')
+      .replace(/[^a-z0-9]/gi, '_')
       .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '') || 'Amazon_Orders'
+      .replace(/^_|_$/g, '') || 'Seller'
   );
+}
+
+// The Speed Ecom account's registered business/company name (shown in the
+// account bar) - the only shop/seller name already available here, since
+// unlike Meesho this extension has no code that scrapes a store name off
+// Seller Central itself.
+async function getTenantName() {
+  let auth;
+  try {
+    ({ auth } = await chrome.storage.local.get('auth'));
+  } catch (_) {
+    return 'Seller';
+  }
+  return safeName(auth?.user?.tenant || auth?.user?.name || 'Seller');
+}
+
+// Builds the outer ZIP's filename. No more user-editable "Zip File Name"
+// field - it's always derived from the shop name and the requested date
+// range, same idea as Meesho's Meesho_<Shop>_<from>_to_<to>.zip. `label`
+// distinguishes Amazon's several report types (Orders/Payments/GST/...),
+// which Meesho doesn't need since it only has one sync flow.
+async function buildZipName(label, fromDate, toDate, isRetry) {
+  const tenant = await getTenantName();
+  const base = `Amazon_${label}_${tenant}_${fromDate}_to_${toDate}`;
+  return isRetry ? `${base}_Retry` : base;
 }
 
 function buildOrderFilename(fromDate, toDate, ext) {
@@ -830,7 +858,7 @@ async function orderSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildOrderFilename(job.fromDate, job.toDate, '.txt');
       const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'Orders' }];
-      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('Orders', job.fromDate, job.toDate), job.tabId);
       await recordLastSync('Orders', state);
       await clearOrderJob();
       return;
@@ -855,10 +883,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startOrderSync({ fromDate, toDate, zipName, tabId }) {
+async function startOrderSync({ fromDate, toDate, tabId }) {
   await setOrderJob({
     phase: 'scheduling',
-    fromDate, toDate, zipName, tabId,
+    fromDate, toDate, tabId,
     referenceId: null,
     paused: false,
     cancelled: false,
@@ -995,7 +1023,7 @@ async function paymentsSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildPaymentsFilename(job.fromDate, job.toDate, '.csv');
       const tasks = [{ reportId: job.reportId, filename, zipFolder: 'Payments', kind: 'payments' }];
-      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('Payments', job.fromDate, job.toDate), job.tabId);
       await recordLastSync('Payments', state);
       await clearPaymentsJob();
       return;
@@ -1015,10 +1043,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startPaymentsSync({ fromDate, toDate, zipName, tabId }) {
+async function startPaymentsSync({ fromDate, toDate, tabId }) {
   await setPaymentsJob({
     phase: 'scheduling',
-    fromDate, toDate, zipName, tabId,
+    fromDate, toDate, tabId,
     paused: false,
     cancelled: false,
     startedAt: Date.now(),
@@ -1281,12 +1309,12 @@ async function gstSyncTick() {
         ];
         const reason = parts.join(' | ') || 'No report types were selected.';
         const state = newState({ finished: true, error: `No reports were generated. ${reason}` });
-        if (failures.length) state.retry = { type: 'gst', types: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        if (failures.length) state.retry = { type: 'gst', types: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate };
         await setProgress(state);
         return;
       }
 
-      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('GST', job.fromDate, job.toDate, job.isRetry), job.tabId);
       if (failures.length && !state.cancelled) {
         // `failures` here are types that never made it into `tasks` at all
         // (failed during scheduling/polling, before processDownloadQueue
@@ -1300,7 +1328,7 @@ async function gstSyncTick() {
       if (!state.cancelled) {
         const failedTypes = [...new Set((state.failures || []).map((f) => f.cat).filter(Boolean))];
         if (failedTypes.length) {
-          state.retry = { type: 'gst', types: failedTypes, fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+          state.retry = { type: 'gst', types: failedTypes, fromDate: job.fromDate, toDate: job.toDate };
         }
       }
       await setProgress(state);
@@ -1323,12 +1351,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startGstSync({ types, fromDate, toDate, zipName, tabId }) {
+async function startGstSync({ types, fromDate, toDate, isRetry, tabId }) {
   const sub = {};
   for (const t of types) sub[t] = { phase: 'scheduling' };
   await setGstJob({
     phase: 'scheduling',
-    types, fromDate, toDate, zipName, tabId,
+    types, fromDate, toDate, isRetry, tabId,
     sub,
     paused: false,
     cancelled: false,
@@ -1477,7 +1505,7 @@ async function adsSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildAdsFilename(job.fromDate, job.toDate, '.xlsx');
       const tasks = [{ urlString: job.urlString, filename, zipFolder: 'Ads', kind: 'ads' }];
-      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('Ads', job.fromDate, job.toDate), job.tabId);
       await recordLastSync('Ads', state);
       await clearAdsJob();
       return;
@@ -1497,10 +1525,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startAdsSync({ fromDate, toDate, zipName, tabId }) {
+async function startAdsSync({ fromDate, toDate, tabId }) {
   await setAdsJob({
     phase: 'scheduling',
-    fromDate, toDate, zipName, tabId,
+    fromDate, toDate, tabId,
     reportId: null,
     paused: false,
     cancelled: false,
@@ -1757,12 +1785,12 @@ async function bulkSyncTick() {
         ];
         const reason = parts.join(' | ') || 'No report types were selected.';
         const state = newState({ finished: true, error: `No reports were generated. ${reason}` });
-        if (failures.length) state.retry = { type: 'bulk', categories: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+        if (failures.length) state.retry = { type: 'bulk', categories: failures.map((f) => f.cat), fromDate: job.fromDate, toDate: job.toDate, label: job.label };
         await setProgress(state);
         return;
       }
 
-      const state = await processDownloadQueue(tasks, safeZipName(job.zipName), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName(job.label || 'Bulk', job.fromDate, job.toDate, job.isRetry), job.tabId);
       if (failures.length && !state.cancelled) {
         // `failures` here are categories that never made it into `tasks` at
         // all (failed during scheduling/polling, before processDownloadQueue
@@ -1780,7 +1808,7 @@ async function bulkSyncTick() {
       if (!state.cancelled) {
         const failedCats = [...new Set((state.failures || []).map((f) => f.cat).filter(Boolean))];
         if (failedCats.length) {
-          state.retry = { type: 'bulk', categories: failedCats, fromDate: job.fromDate, toDate: job.toDate, zipName: job.zipName };
+          state.retry = { type: 'bulk', categories: failedCats, fromDate: job.fromDate, toDate: job.toDate, label: job.label };
         }
       }
       await setProgress(state);
@@ -1804,12 +1832,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startBulkSync({ categories, fromDate, toDate, zipName, tabId }) {
+async function startBulkSync({ categories, fromDate, toDate, label, isRetry, tabId }) {
   const sub = {};
   for (const cat of categories) sub[cat] = { phase: 'scheduling' };
   await setBulkJob({
     phase: 'scheduling',
-    categories, fromDate, toDate, zipName, tabId,
+    categories, fromDate, toDate, label, isRetry, tabId,
     sub,
     navTabId: null, navTabOwned: false, navTabFor: null,
     paused: false,
@@ -1951,7 +1979,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { fromDate, toDate, zipName } = msg;
+        const { fromDate, toDate } = msg;
         if (!fromDate || !toDate) {
           await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
           return;
@@ -1962,7 +1990,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting order sync: ${fromDate} to ${toDate}`);
-        await startOrderSync({ fromDate, toDate, zipName, tabId: tab.id });
+        await startOrderSync({ fromDate, toDate, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
@@ -1989,7 +2017,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { fromDate, toDate, zipName } = msg;
+        const { fromDate, toDate } = msg;
         if (!fromDate || !toDate) {
           await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
           return;
@@ -2000,7 +2028,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting payments sync: ${fromDate} to ${toDate}`);
-        await startPaymentsSync({ fromDate, toDate, zipName, tabId: tab.id });
+        await startPaymentsSync({ fromDate, toDate, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'payments sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
@@ -2027,7 +2055,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { types, fromDate, toDate, zipName } = msg;
+        const { types, fromDate, toDate, isRetry } = msg;
         if (!Array.isArray(types) || !types.length) {
           await setProgress(newState({ finished: true, error: 'Pick B2B and/or B2C first.' }));
           return;
@@ -2042,7 +2070,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting gst sync: ${types.join('+')} ${fromDate} to ${toDate}`);
-        await startGstSync({ types, fromDate, toDate, zipName, tabId: tab.id });
+        await startGstSync({ types, fromDate, toDate, isRetry, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'gst sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
@@ -2071,7 +2099,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { fromDate, toDate, zipName } = msg;
+        const { fromDate, toDate } = msg;
         if (!fromDate || !toDate) {
           await setProgress(newState({ finished: true, error: 'Pick a date range first.' }));
           return;
@@ -2082,7 +2110,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting ads sync: ${fromDate} to ${toDate}`);
-        await startAdsSync({ fromDate, toDate, zipName, tabId: tab.id });
+        await startAdsSync({ fromDate, toDate, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'ads sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
@@ -2109,7 +2137,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        const { categories, fromDate, toDate, zipName } = msg;
+        const { categories, fromDate, toDate, label, isRetry } = msg;
         if (!Array.isArray(categories) || !categories.length) {
           await setProgress(newState({ finished: true, error: 'Pick at least one report type first.' }));
           return;
@@ -2124,7 +2152,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting bulk sync: ${categories.join(',')} ${fromDate} to ${toDate}`);
-        await startBulkSync({ categories, fromDate, toDate, zipName, tabId: tab.id });
+        await startBulkSync({ categories, fromDate, toDate, label, isRetry, tabId: tab.id });
       } catch (e) {
         console.warn(TAG, 'bulk sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));

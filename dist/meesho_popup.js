@@ -569,12 +569,15 @@ async function initMainApp() {
   } else if (saved.lastStatus && saved.lastStatus.ok === 'warn') {
     applyStatus('warn', saved.lastStatus.msg);
     lastProcessedStamp = saved.lastStatus.at || null;
+    chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
   } else if (saved.lastStatus && saved.lastStatus.ok === true) {
     applyStatus('ok', saved.lastStatus.msg);
     lastProcessedStamp = saved.lastStatus.at || null;
+    chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
   } else if (saved.lastStatus && saved.lastStatus.ok === false) {
     applyStatus('err', saved.lastStatus.msg);
     lastProcessedStamp = saved.lastStatus.at || null;
+    chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
   } else {
     applyStatus('idle', 'Ready to sync.');
   }
@@ -673,6 +676,7 @@ function scheduleClear(ms) {
   clearTimer = setTimeout(async () => {
     clearTimer = null;
     try { await chrome.storage.local.remove('lastStatus'); } catch (_) {}
+    chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
     applyStatus('idle', 'Ready to sync.');
   }, ms);
 }

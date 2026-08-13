@@ -26,7 +26,6 @@
     {
       id: 'amazon',
       name: 'Amazon',
-      mark: 'A',
       popup: 'amazon_popup.html',
       portal: 'https://sellercentral.amazon.in/',
       progressKey: 'amz_syncProgress',
@@ -34,7 +33,6 @@
     {
       id: 'meesho',
       name: 'Meesho',
-      mark: 'M',
       popup: 'meesho_popup.html',
       portal: 'https://supplier.meesho.com/',
       statusKey: 'lastStatus',
@@ -42,7 +40,6 @@
     {
       id: 'myntra',
       name: 'Myntra',
-      mark: 'M',
       popup: 'myntra_popup.html',
       portal: 'https://partners.myntrainfo.com/',
       progressKey: 'myn_syncProgress',
@@ -93,7 +90,11 @@
 
     const mark = document.createElement('div');
     mark.className = `row-mark ${m.id}`;
-    mark.textContent = m.mark;
+    mark.title = m.name;
+    const markImg = document.createElement('img');
+    markImg.src = `brand-icons/${m.id}.png`;
+    markImg.alt = m.name;
+    mark.appendChild(markImg);
 
     const meta = document.createElement('div');
     meta.className = 'row-meta';
@@ -233,6 +234,16 @@
     });
   }
 
+  $('sePwToggle').addEventListener('click', () => {
+    const input = $('seLoginPassword');
+    const btn = $('sePwToggle');
+    const showing = input.type === 'password';
+    input.type = showing ? 'text' : 'password';
+    btn.classList.toggle('showing', showing);
+    btn.title = showing ? 'Hide password' : 'Show password';
+    btn.setAttribute('aria-label', btn.title);
+  });
+
   // ── Logout (the single place to sign out) ─────────────────────────────────
   $('seLogoutBtn').addEventListener('click', async () => {
     try {
@@ -240,6 +251,8 @@
     } catch (_) {}
     $('seLoginEmail').value = '';
     $('seLoginPassword').value = '';
+    $('seLoginPassword').type = 'password';
+    $('sePwToggle').classList.remove('showing');
     setError('');
     await refresh();
   });

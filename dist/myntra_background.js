@@ -50,7 +50,7 @@ chrome.declarativeNetRequest.updateSessionRules({
 // RSA-OAEP/SHA-1 encrypt the password -> POST login (email + encrypted
 // password) -> GET profile with the bearer token. Token is cached in
 // chrome.storage.local indefinitely - nothing here clears it automatically.
-const AUTH_ORIGIN = 'https://speedecomsolution.com';
+const AUTH_ORIGIN = 'https://speedecomsolution.in';
 
 // Production's CORS check rejects requests whose Origin isn't its own web
 // app (the extension's real origin, chrome-extension://<id>, isn't on that
@@ -164,8 +164,43 @@ async function authFetchProfile(token) {
   return extractUser(body);
 }
 
+// Toolbar-icon badge - lets a running/finished sync be noticed without
+// having the popup open at all. Badge text is stateful (unlike a popup),
+// so it deliberately stays as-is (✓ or !) after a sync finishes until the
+// popup is actually opened and acknowledges it (see the CLEAR_BADGE message,
+// sent right after initMainApp() clears a finished syncProgress) - clearing
+// it the instant the sync finishes would defeat the point of a passive
+// "something happened" signal.
+async function updateBadge(progress) {
+  try {
+    if (!progress || (!progress.active && !progress.finished)) {
+      await chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+    if (progress.finished) {
+      if (progress.error) {
+        await chrome.action.setBadgeText({ text: '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+      } else if (progress.cancelled) {
+        await chrome.action.setBadgeText({ text: '' });
+      } else {
+        await chrome.action.setBadgeText({ text: '✓' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#16a34a' });
+      }
+      return;
+    }
+    // Active: show a done/total count once downloading is actually under
+    // way (meaningful progress), otherwise a plain dot for the
+    // scheduling/waiting-for-Myntra phases where there's nothing to count yet.
+    const text = progress.total > 0 ? `${progress.done}/${progress.total}` : '•';
+    await chrome.action.setBadgeText({ text: String(text).slice(0, 4) });
+    await chrome.action.setBadgeBackgroundColor({ color: '#FF9900' });
+  } catch (_) {}
+}
+
 async function setProgress(progress) {
   try { await chrome.storage.local.set({ syncProgress: { ...progress, at: Date.now() } }); } catch (_) {}
+  await updateBadge(progress);
 }
 
 // `active` is distinct from `finished`/`total`: it's true from the moment a
@@ -507,6 +542,12 @@ async function collectPaymentTasksViaApi(tabId, { fromDate, toDate, types }) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CLEAR_BADGE') {
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg?.type === 'AUTH_LOGIN') {
     (async () => {
       try {
