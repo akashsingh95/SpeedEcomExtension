@@ -139,19 +139,33 @@ async function clearSyncState() {
   try { await chrome.storage.local.remove('syncState'); } catch (_) {}
 }
 
-// Tracks tabs whose sync must stop ASAP because the tab was closed/reloaded
-// mid-sync. The polling loops below check this between every step instead of
-// grinding on uselessly for minutes against a tab that's gone.
+// Tracks tabs whose sync must stop ASAP because the tab was closed, or
+// reloaded and never came back. The polling loops below check this between
+// every step instead of grinding on uselessly for minutes against a tab
+// that's genuinely gone.
 const abortedTabs = new Set();
 
+// A reload alone must NOT stop the sync (Amazon's engine already tolerates
+// this via storage-persisted jobs + alarm ticks that just re-inject and carry
+// on; Meesho's single-flight runSync() needs the same tolerance). When the
+// synced tab starts (re)loading, wait for it to finish and try to reconnect
+// the content script via the same ensureContentScript() recovery path
+// relayApiCall() already relies on elsewhere. Only give up - and only then
+// mark the tab aborted - if that reconnect genuinely fails (content.js never
+// comes back, e.g. the seller navigated away to an unrelated site).
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.status !== 'loading') return;
   const state = await getSyncState();
-  if (state && state.tabId === tabId) {
+  if (!state || state.tabId !== tabId) return;
+  console.warn(TAG, 'Meesho tab reloading during sync - waiting to reconnect...');
+  const recovered = await ensureContentScript(tabId);
+  if (!recovered) {
     abortedTabs.add(tabId);
     await clearSyncState();
-    console.warn(TAG, 'Tab refreshed during sync, resetting status');
-    await setStatus({ ok: false, msg: 'Sync stopped: page was reloaded. Try again.' });
+    console.warn(TAG, 'Could not reconnect after reload, stopping sync');
+    await setStatus({ ok: false, msg: 'Sync stopped: could not reconnect to the Meesho tab after it reloaded. Try again.' });
+  } else {
+    console.log(TAG, 'Reconnected to Meesho tab after reload, sync continues');
   }
 });
 
