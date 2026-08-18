@@ -419,23 +419,24 @@
   const ADS_MARKETPLACE_ID = 'A21TJRUUN4KGV';
 
   // columns/translationsMap/reportMetadata are fixed for this exact report
-  // (Sponsored Products -> Search term) - confirmed live via a full cURL
-  // capture of a real create-report submission, unaffected by which dates are
-  // picked. reportPeriod becomes "CUSTOM" for a real date range (vs. a named
-  // preset like "LAST_30_DAYS") - confirmed live by capturing the same call
-  // with a manually-picked date range instead of a preset.
-  const ADS_SEARCH_TERM_COLUMNS = [
+  // (Sponsored Products -> Advertised product) - confirmed live via a full
+  // request-payload capture of a real create-report submission, unaffected
+  // by which dates are picked. reportPeriod becomes "CUSTOM" for a real date
+  // range (vs. a named preset like "LAST_30_DAYS") - confirmed live earlier
+  // for the Search Term report (same app, same shape) by capturing the same
+  // call with a manually-picked date range instead of a preset.
+  const ADS_ADVERTISED_PRODUCT_COLUMNS = [
     'startDate', 'endDate', 'portfolioName', 'campaignBudgetCurrencyCode', 'campaignName',
-    'adGroupName', 'marketplaceId', 'targeting', 'keywordType', 'searchTerm', 'impressions',
+    'adGroupName', 'marketplaceId', 'advertisedSku', 'advertisedAsin', 'impressions',
     'clicks', 'clickThroughRate', 'costPerClick', 'spend', 'sales7d', 'acosClicks7d',
     'roasClicks7d', 'purchases7d', 'unitsSoldClicks7d', 'purchaseClickRate7d',
     'unitsSoldSameSku7d', 'unitsSoldOtherSku7d', 'attributedSalesSameSku7d', 'salesOtherSku7d',
   ];
-  const ADS_SEARCH_TERM_TRANSLATIONS = {
+  const ADS_ADVERTISED_PRODUCT_TRANSLATIONS = {
     startDate: 'Start Date', endDate: 'End Date', portfolioName: 'portfolioName',
     campaignBudgetCurrencyCode: 'Currency - not converted', campaignName: 'Campaign Name',
-    adGroupName: 'Ad Group Name', marketplaceId: 'marketplaceId', targeting: 'Targeting',
-    keywordType: 'keywordType', searchTerm: 'searchTerm', impressions: 'Impressions',
+    adGroupName: 'Ad Group Name', marketplaceId: 'marketplaceId', advertisedSku: 'advertisedSku',
+    advertisedAsin: 'advertisedAsin', impressions: 'Impressions',
     clicks: 'Clicks', clickThroughRate: 'clickThroughRate', costPerClick: 'costPerClick',
     spend: 'Spend', sales7d: '7 Day Total Sales - not converted', acosClicks7d: 'acosClicks7d',
     roasClicks7d: 'roasClicks7d', purchases7d: 'purchases7d', unitsSoldClicks7d: 'unitsSoldClicks7d',
@@ -457,24 +458,24 @@
       credentials: 'same-origin',
       headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'anti-csrftoken-a2z': csrfToken },
       body: JSON.stringify({
-        reportName: 'Sponsored Products Search term report',
-        reportType: 'searchTerms',
+        reportName: 'Sponsored Products Advertised product report',
+        reportType: 'adProducts',
         reportPeriod: 'CUSTOM',
         reportStartDate: startDate,
         reportEndDate: endDate,
         reportPeriodTimezone: 'Asia/Calcutta',
         subscriptionDelivery: { frequency: 'SINGLE' },
-        reportMetadata: { reportCategoryId: 'sp', reportTypeId: 'searchTerms', templateId: null, templateGuidance: null, timeUnitId: 'summary' },
+        reportMetadata: { reportCategoryId: 'sp', reportTypeId: 'adProducts', templateId: null, templateGuidance: null, timeUnitId: 'summary' },
         filterTypes: ['marketplaceIds', 'mrcAccreditationStatus'],
         recipients: null,
         reportCategory: 'sp',
         timeUnit: 'summary',
         currencyOfVisualization: null,
-        columns: ADS_SEARCH_TERM_COLUMNS,
+        columns: ADS_ADVERTISED_PRODUCT_COLUMNS,
         marketplaceIds: [ADS_MARKETPLACE_ID],
         campaignSites: null,
         mrcAccreditationStatus: null,
-        translationsMap: ADS_SEARCH_TERM_TRANSLATIONS,
+        translationsMap: ADS_ADVERTISED_PRODUCT_TRANSLATIONS,
       }),
     });
     const text = await res.text();
@@ -484,44 +485,16 @@
     return { status: res.status, reportId };
   }
 
-  // subscriptions list is POSTed (not GET) despite being a read - confirmed
-  // live from a real capture (has a body + Content-Length, which a real GET
-  // request cannot carry). Sorted DESC by modified time so a freshly created
-  // report reliably lands within the first page even at a small pageLimit.
-  async function fetchAdsSubscriptionsList() {
-    const entityId = getAdsEntityId();
-    if (!entityId) return { status: 0, entityIdMissing: true };
-    const csrfToken = getAdsCsrfToken();
-    if (!csrfToken) return { status: 0, csrfMissing: true };
-
-    const res = await fetch(`/reports/api/subscriptions?entityId=${encodeURIComponent(entityId)}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'anti-csrftoken-a2z': csrfToken },
-      body: JSON.stringify({
-        sort: { columnName: 'SUBSCRIPTION_AUDIT_MODIFIED_ON', order: 'DESC' },
-        filters: [],
-        pagination: { pageLimit: 50, pageOffset: 0 },
-      }),
-    });
-    const text = await res.text();
-    let body = null;
-    try { body = JSON.parse(text); } catch (_) { /* leave null */ }
-    return { status: res.status, body };
-  }
-
-  // The poll response's own latestProcessedReportSummary.urlString already
-  // gives the exact relative download path (documentId + everything else
-  // baked in) - confirmed live, no separate resolve step needed. It
-  // redirects to a presigned S3 URL; fetch() follows that transparently.
-  async function fetchAdsReportFile(urlString) {
-    const res = await fetch(urlString, { credentials: 'same-origin', headers: { accept: '*/*' } });
-    if (!res.ok) return { status: res.status, base64: null };
-    const buf = await res.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return { status: res.status, base64: btoa(binary) };
+  // Confirmed live via DevTools inspection: the account-switcher header in
+  // Seller Central's top-left bar. The Vue `data-v-xxxxx` scoped-style
+  // attribute isn't stable across deploys, so only the class name is
+  // targeted. Text comes back with a stray trailing "." and extra
+  // whitespace (e.g. "VRINDA ENTERPRISE  ."), hence the extra trim/strip.
+  function readSellerAccountName() {
+    const el = document.querySelector('.dropdown-account-switcher-header-label-global');
+    if (!el) return null;
+    const name = el.textContent.trim().replace(/\.+$/, '').trim();
+    return name || null;
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -530,6 +503,14 @@
     // discarded/reloaded) won't answer this.
     if (msg?.type === 'PING') {
       sendResponse({ ok: true });
+      return false;
+    }
+
+    // Returns null (not an error) when the selector doesn't match - e.g. a
+    // different Amazon origin like advertising.amazon.in - so background.js
+    // can fall back to the SpeedEcom tenant name instead of failing the zip.
+    if (msg?.type === 'GET_SELLER_ACCOUNT_NAME') {
+      sendResponse({ name: readSellerAccountName() });
       return false;
     }
 
@@ -767,38 +748,17 @@
       return true;
     }
 
+    if (msg?.type === 'ADS_PAGE_READY') {
+      sendResponse({ ready: !!(getAdsEntityId() && getAdsCsrfToken()) });
+      return false;
+    }
+
     if (msg?.type === 'SCHEDULE_ADS_REPORT') {
       (async () => {
         try {
           const r = await scheduleAdsReport(msg);
           console.log(TAG, `schedule ads report: HTTP ${r.status}`, r.reportId);
-          sendResponse({ ok: true, status: r.status, reportId: r.reportId, csrfMissing: r.csrfMissing, entityIdMissing: r.entityIdMissing });
-        } catch (e) {
-          sendResponse({ ok: false, error: e?.message || String(e) });
-        }
-      })();
-      return true;
-    }
-
-    if (msg?.type === 'FETCH_ADS_LIST') {
-      (async () => {
-        try {
-          const r = await fetchAdsSubscriptionsList();
-          console.log(TAG, `ads subscriptions list: HTTP ${r.status}, entries=${r.body?.subscriptions?.length}`);
-          sendResponse({ ok: true, status: r.status, body: r.body, csrfMissing: r.csrfMissing, entityIdMissing: r.entityIdMissing });
-        } catch (e) {
-          sendResponse({ ok: false, error: e?.message || String(e) });
-        }
-      })();
-      return true;
-    }
-
-    if (msg?.type === 'FETCH_ADS_FILE') {
-      (async () => {
-        try {
-          const r = await fetchAdsReportFile(msg.urlString);
-          console.log(TAG, `ads report file: HTTP ${r.status}, bytes=${r.base64 ? Math.floor(r.base64.length * 0.75) : 0}`);
-          sendResponse({ ok: true, status: r.status, base64: r.base64 });
+          sendResponse({ ok: true, status: r.status, reportId: r.reportId, csrfMissing: r.csrfMissing, entityIdMissing: r.entityIdMissing, pageUrl: location.href });
         } catch (e) {
           sendResponse({ ok: false, error: e?.message || String(e) });
         }

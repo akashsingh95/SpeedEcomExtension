@@ -374,6 +374,7 @@ const BULK_LIVE_META = {
   gstB2C: { row: 'bulkLiveGstB2C', dot: 'bulkLiveGstB2CDot', status: 'bulkLiveGstB2CStatus' },
   returns: { row: 'bulkLiveReturns', dot: 'bulkLiveReturnsDot', status: 'bulkLiveReturnsStatus' },
   fbaReturns: { row: 'bulkLiveFbaReturns', dot: 'bulkLiveFbaReturnsDot', status: 'bulkLiveFbaReturnsStatus' },
+  ads: { row: 'bulkLiveAds', dot: 'bulkLiveAdsDot', status: 'bulkLiveAdsStatus' },
 };
 
 // Shared by both the Bulk tab's per-category grid and the GST tab's own
@@ -418,6 +419,11 @@ function paintLiveRow(meta, phase) {
     dotBg = '#16a34a'; dotBorder = '#16a34a';
     statusColor = dark ? '#4ade80' : '#15803d';
     rowBg = dark ? '#0f2318' : '#f2fbf6'; rowBorder = dark ? '#1e4d33' : '#bbf0d1';
+  } else if (phase === 'requested') {
+    text = 'Requested';
+    dotBg = '#2563eb'; dotBorder = '#2563eb';
+    statusColor = dark ? '#93c5fd' : '#1d4ed8';
+    rowBg = dark ? '#0f1f33' : '#eff6ff'; rowBorder = dark ? '#1e3a5f' : '#bfdbfe';
   } else if (phase === 'empty') {
     text = 'No data';
     dotBg = dark ? '#3a3d44' : '#94a3b8'; dotBorder = dark ? '#6b7280' : '#94a3b8';
@@ -561,6 +567,7 @@ function render(progress) {
     $('syncBulk').disabled = false;
     $('progressActions').style.display = 'none';
     $('retryFailedBtn').style.display = 'none';
+    $('progressNote').style.display = 'none';
     return;
   }
   wrap.classList.add('show');
@@ -602,6 +609,13 @@ function render(progress) {
     return;
   }
   $('progressError').style.display = 'none';
+
+  if (progress.note) {
+    $('progressNote').textContent = progress.note;
+    $('progressNote').style.display = 'block';
+  } else {
+    $('progressNote').style.display = 'none';
+  }
 
   if (progress.total === 0) {
     // Still requesting/waiting for the report to generate - don't know the
@@ -647,7 +661,7 @@ function render(progress) {
       fill.style.width = '100%';
       fill.classList.add('cancelled');
     } else {
-      $('progressCount').textContent = `Downloaded ${progress.done} / ${progress.total}`;
+      $('progressCount').textContent = progress.requestedOnly ? (progress.current || 'Requested') : `Downloaded ${progress.done} / ${progress.total}`;
       // A brief scale-in pulse the moment this run first reports done, not
       // replayed on every 800ms re-render of the same already-finished
       // state (dataset.animated is reset back to 'false' above the instant
@@ -1178,16 +1192,18 @@ $('syncGst').addEventListener('click', async () => {
   }
 });
 
-// Confirmed live: the Sponsored Products -> Search term report's own
-// reportMetadata catalog entry gives maxLookBackDays: 65, and the real date
-// picker's actual allowed range (19 May - 22 Jul, with 22 Jul = today) spans
-// exactly 65 days ending on TODAY - so unlike Orders/Returns' floating span
-// (which can slide to any past month), this is an ANCHORED window relative
-// to today, same shape as GST's 45-day rule. The 2-days-back cutoff (instead
-// of GST's "today is fine") is applied per direct instruction for
-// consistency, not separately confirmed evidence of a generation-delay
-// quirk on this specific endpoint.
-const MAX_ADS_LOOKBACK_DAYS = 65;
+// Confirmed live for the Sponsored Products -> Advertised product report
+// (the report type this engine now uses, switched from Search term): the
+// real date picker's actual allowed range (21 May - 18 Aug, with 18 Aug =
+// today) spans exactly 90 days ending on TODAY - so unlike Orders/Returns'
+// floating span (which can slide to any past month), this is an ANCHORED
+// window relative to today, same shape as GST's 45-day rule. (Search term's
+// own cap was a separately-confirmed 65 days - report types on this app
+// have very different caps.) The 2-days-back cutoff (instead of GST's
+// "today is fine") is applied per direct instruction for consistency, not
+// separately confirmed evidence of a generation-delay quirk on this
+// specific endpoint.
+const MAX_ADS_LOOKBACK_DAYS = 90;
 function maxAdsSelectableDate() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 2);
@@ -1225,8 +1241,8 @@ function clampAdsDateInputs() {
   const toEl = $('adsToDate');
   const reasons = [];
 
-  if (fromEl.value && fromEl.value < minDate) { fromEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (65 days back)`); }
-  if (toEl.value && toEl.value < minDate) { toEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (65 days back)`); }
+  if (fromEl.value && fromEl.value < minDate) { fromEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (${MAX_ADS_LOOKBACK_DAYS} days back)`); }
+  if (toEl.value && toEl.value < minDate) { toEl.value = minDate; reasons.push(`the earliest selectable date is ${minDate} (${MAX_ADS_LOOKBACK_DAYS} days back)`); }
   if (fromEl.value && fromEl.value > maxDate) { fromEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (2 days ago)`); }
   if (toEl.value && toEl.value > maxDate) { toEl.value = maxDate; reasons.push(`the latest selectable date is ${maxDate} (2 days ago)`); }
   if (fromEl.value && toEl.value && fromEl.value > toEl.value) { fromEl.value = toEl.value; reasons.push("the From date can't be after the To date"); }
@@ -1278,7 +1294,7 @@ $('syncAds').addEventListener('click', async () => {
   const maxDate = maxAdsSelectableDate();
   if (!fromDate || !toDate) { showAdsFormError('Pick a date range first.'); return; }
   if (fromDate > toDate) { showAdsFormError('From date must be before the To date.'); return; }
-  if (fromDate < minDate) { showAdsFormError(`The earliest selectable date is ${minDate} (65 days back).`); return; }
+  if (fromDate < minDate) { showAdsFormError(`The earliest selectable date is ${minDate} (${MAX_ADS_LOOKBACK_DAYS} days back).`); return; }
   if (toDate > maxDate) { showAdsFormError(`The latest selectable date is ${maxDate} (2 days ago).`); return; }
 
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
@@ -1290,11 +1306,11 @@ $('syncAds').addEventListener('click', async () => {
   }
 });
 
-// ── Bulk: Orders + Payments + B2B/B2C in one pass ───────────────────────────
-// Returns and Ads are deliberately left out for now - both need a specific
-// Seller Central/Ads page open on the exact right tab (not just the right
-// origin), which doesn't fit cleanly into "one shared date range, one shared
-// tab" yet.
+// ── Bulk: Orders + Payments + B2B/B2C + Returns + Ads in one pass ──────────
+// Returns and Ads both need a specific Seller Central/Ads page open on the
+// exact right tab (not just the right origin) - background.js's
+// resolvePageForCategory/PAGE_REQUIREMENTS system handles that per-category
+// tab resolution transparently, so it's not a concern here in popup.js.
 //
 // The shared range's own ceiling is already the same "today - 2 days" cutoff
 // Orders/Payments/GST each use individually, so Payments never needs to be
@@ -1302,7 +1318,10 @@ $('syncAds').addEventListener('click', async () => {
 // whatever range is picked. B2B/B2C used to have a 45-day lookback floor
 // here too, but that's now handled entirely transparently by background.js
 // (falls back to GST Monthly Reports for anything older than 45 days), so
-// GST is never grayed out for range reasons any more either.
+// GST is never grayed out for range reasons any more either. Ads has its own
+// independent anchored window (MAX_ADS_LOOKBACK_DAYS, same as its standalone
+// tab), so it's the one other category that can actually fall outside a
+// picked range and needs the same graying-out treatment as Orders.
 function bulkOrdersFits(fromDate, toDate) {
   return rangeDays(fromDate, toDate) <= MAX_RANGE_DAYS;
 }
@@ -1357,10 +1376,40 @@ function updateBulkAvailability() {
   const note = $('bulkAvailabilityNote');
   const reasons = [];
 
+  // dataset.autoGrayed marks "this checkbox's current unchecked state was
+  // forced by the range not fitting, not a deliberate user click" - so once
+  // the range fits again it's safe to restore the checked state
+  // automatically, without ever overriding a real manual uncheck (setting
+  // .checked from JS doesn't fire 'change', so the click listeners below
+  // only clear this flag on a genuine user click).
   const ordersOk = !fromDate || !toDate || bulkOrdersFits(fromDate, toDate);
   ordersEl.disabled = !ordersOk;
-  if (!ordersOk) { ordersEl.checked = false; reasons.push(`Orders needs a ${MAX_RANGE_DAYS}-day span or less`); }
+  if (!ordersOk) {
+    ordersEl.checked = false;
+    ordersEl.dataset.autoGrayed = 'true';
+    reasons.push(`Orders needs a ${MAX_RANGE_DAYS}-day span or less`);
+  } else if (ordersEl.dataset.autoGrayed === 'true') {
+    ordersEl.checked = true;
+    ordersEl.dataset.autoGrayed = '';
+  }
   syncDsCardVisual($('bulkOrdersCard'), ordersEl);
+
+  // Ads has its own independent anchored window (same MAX_ADS_LOOKBACK_DAYS/
+  // minAdsSelectableDate/maxAdsSelectableDate its standalone tab uses) - not
+  // handled transparently in the backend the way GST is, so it needs the
+  // same graying-out treatment as Orders.
+  const adsEl = $('bulkAds');
+  const adsOk = !fromDate || !toDate || (fromDate >= minAdsSelectableDate() && toDate <= maxAdsSelectableDate());
+  adsEl.disabled = !adsOk;
+  if (!adsOk) {
+    adsEl.checked = false;
+    adsEl.dataset.autoGrayed = 'true';
+    reasons.push(`Ads needs a date range within the last ${MAX_ADS_LOOKBACK_DAYS} days`);
+  } else if (adsEl.dataset.autoGrayed === 'true') {
+    adsEl.checked = true;
+    adsEl.dataset.autoGrayed = '';
+  }
+  syncDsCardVisual($('bulkAdsCard'), adsEl);
 
   syncDsCardVisual($('bulkGstCard'), gstEl);
 
@@ -1373,12 +1422,19 @@ function updateBulkAvailability() {
   const standardFits = !fromDate || !toDate || bulkStandardReturnsFits(fromDate, toDate);
   const standardTypeEl = $('bulkReturnsTypeStandard');
   const fbaTypeEl = $('bulkReturnsTypeFba');
+  if (!standardFits) {
+    standardTypeEl.checked = false;
+    standardTypeEl.dataset.autoGrayed = 'true';
+    reasons.push(`Standard Returns needs a ${MAX_RETURNS_RANGE_DAYS}-day span or less`);
+  } else if (standardTypeEl.dataset.autoGrayed === 'true') {
+    standardTypeEl.checked = true;
+    standardTypeEl.dataset.autoGrayed = '';
+  }
+  // Disabled state also considers the parent Returns checkbox, separately
+  // from the range-fit tracking above - unchecking the parent shouldn't be
+  // treated as (or clear) an auto-grayed range state.
   standardTypeEl.disabled = !returnsEl.checked || !standardFits;
   fbaTypeEl.disabled = !returnsEl.checked;
-  if (!standardFits && standardTypeEl.checked) {
-    standardTypeEl.checked = false;
-    reasons.push(`Standard Returns needs a ${MAX_RETURNS_RANGE_DAYS}-day span or less`);
-  }
   syncDsCardVisual($('bulkReturnsCard'), returnsEl);
 
   syncDsCardVisual($('bulkPaymentsCard'), $('bulkPayments'));
@@ -1443,15 +1499,16 @@ const bulkDatePicker = createDateRangePicker({
   ],
 });
 
-$('bulkOrders').addEventListener('change', () => syncDsCardVisual($('bulkOrdersCard'), $('bulkOrders')));
+$('bulkOrders').addEventListener('change', () => { $('bulkOrders').dataset.autoGrayed = ''; syncDsCardVisual($('bulkOrdersCard'), $('bulkOrders')); });
 $('bulkPayments').addEventListener('change', () => syncDsCardVisual($('bulkPaymentsCard'), $('bulkPayments')));
+$('bulkAds').addEventListener('change', () => { $('bulkAds').dataset.autoGrayed = ''; syncDsCardVisual($('bulkAdsCard'), $('bulkAds')); });
 $('bulkGst').addEventListener('change', () => {
   syncDsCardVisual($('bulkGstCard'), $('bulkGst'));
   $('bulkGstTypeB2B').disabled = !$('bulkGst').checked;
   $('bulkGstTypeB2C').disabled = !$('bulkGst').checked;
 });
 $('bulkReturns').addEventListener('change', updateBulkAvailability);
-$('bulkReturnsTypeStandard').addEventListener('change', updateBulkAvailability);
+$('bulkReturnsTypeStandard').addEventListener('change', () => { $('bulkReturnsTypeStandard').dataset.autoGrayed = ''; updateBulkAvailability(); });
 $('bulkReturnsTypeFba').addEventListener('change', updateBulkAvailability);
 
 $('syncBulk').addEventListener('click', async () => {
@@ -1468,6 +1525,7 @@ $('syncBulk').addEventListener('click', async () => {
   const categories = [];
   if ($('bulkOrders').checked && !$('bulkOrders').disabled) categories.push('orders');
   if ($('bulkPayments').checked) categories.push('payments');
+  if ($('bulkAds').checked && !$('bulkAds').disabled) categories.push('ads');
   if ($('bulkGst').checked && !$('bulkGst').disabled) {
     if ($('bulkGstTypeB2B').checked) categories.push('gstB2B');
     if ($('bulkGstTypeB2C').checked) categories.push('gstB2C');

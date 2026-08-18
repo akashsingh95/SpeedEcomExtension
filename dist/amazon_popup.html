@@ -238,7 +238,7 @@
          left always has the title's own width as headroom, while growing
          right (the original approach) ran out of room and got clipped by
          the popup's own fixed 360px edge whenever the title was long
-         (e.g. "Sponsored Products Search Term Report"). */
+         (e.g. "Sponsored Products Advertised Product Report"). */
       position: absolute; top: 20px; right: 0; width: 175px; max-width: 58vw;
       background: #16181d; color: #f1f2f4; font-size: 10.5px; font-weight: 500; line-height: 1.45;
       padding: 8px 10px; border-radius: 8px;
@@ -342,6 +342,7 @@
       text-transform: none; letter-spacing: 0; cursor: pointer;
     }
     .radio-option input[type="radio"] { accent-color: #FF9900; width: 15px; height: 15px; cursor: pointer; }
+    .radio-option:has(input:disabled) { opacity: 0.5; cursor: default; }
 
     .form-error {
       font-size: 11px; color: #991b1b; margin-top: 7px; padding: 7px 10px;
@@ -444,6 +445,7 @@
     .progress-current { font-size: 11px; color: #8a8f9c; margin-top: 8px; word-break: break-all; }
     .progress-failures { font-size: 11px; color: #b91c1c; margin-top: 6px; font-weight: 600; }
     .progress-error { font-size: 12px; color: #991b1b; margin-top: 6px; line-height: 1.45; }
+    .progress-note { font-size: 11px; color: #1d4ed8; margin-top: 6px; line-height: 1.45; font-weight: 500; }
     .progress-done { font-size: 12px; font-weight: 700; margin-top: 6px; display: flex; align-items: center; gap: 5px; }
     .progress-done.ok { color: #15803d; }
     .progress-done.cancel { color: #6b7280; }
@@ -582,6 +584,7 @@
       :root[data-theme="dark"] .progress-done.cancel { color: #9aa0ac; }
       :root[data-theme="dark"] .progress-failures { color: #f3a4a4; }
       :root[data-theme="dark"] .progress-error { color: #f3a4a4; }
+      :root[data-theme="dark"] .progress-note { color: #93c5fd; }
       :root[data-theme="dark"] #retryFailedBtn { background: #2e2410; border-color: #b8621c; color: #ffb454; }
       :root[data-theme="dark"] #retryFailedBtn:hover { border-color: #FF9900; background: #3a2a12; }
       :root[data-theme="dark"] .progress-actions button { background: #24262c; border-color: #34363d; color: #cbd0da; }
@@ -933,10 +936,10 @@
             <span class="card-title-icon">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a2 2 0 0 1-3.2 2.4L6 15"/></svg>
             </span>
-            Sponsored Products Search Term Report
-            <span class="info-tip" tabindex="0">?<span class="info-tip-bubble">Needs the Ads Reports page (Seller Central → Reports → Advertising) open in this tab.</span></span>
+            Sponsored Products Advertised Product Report
+            <span class="info-tip" tabindex="0">?<span class="info-tip-bubble">Automatically opens the Ads Reports page in the background when syncing - no need to open it yourself.</span></span>
           </div>
-          <div class="card-sub">Pulls the Search Term report from Amazon Ads' Reports page and bundles it into one ZIP.</div>
+          <div class="card-sub">Requests the Advertised Product report from Amazon Ads - Amazon takes 15+ minutes to generate it, so download it yourself from the Ads Reports page once ready.</div>
 
           <div class="field">
             <label>Date Range</label>
@@ -973,7 +976,7 @@
 
           <button id="syncAds">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
-            Sync Ads
+            Request Ads Report
           </button>
           <div class="form-error" id="adsFormError"></div>
         </div>
@@ -1045,6 +1048,11 @@
                 <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
                 <span class="ds-label">Returns</span>
               </label>
+              <label class="ds-card checked" id="bulkAdsCard">
+                <input type="checkbox" id="bulkAds" checked>
+                <span class="ds-box"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                <span class="ds-label">Ads</span>
+              </label>
             </div>
             <div class="radio-group" id="bulkGstTypeRow" style="margin-top:7px;">
               <label class="radio-option"><input type="checkbox" id="bulkGstTypeB2B" checked> B2B</label>
@@ -1088,6 +1096,11 @@
               <span class="live-label">FBA Returns</span>
               <span class="live-status" id="bulkLiveFbaReturnsStatus">Waiting</span>
             </div>
+            <div class="live-row" id="bulkLiveAds">
+              <span class="live-dot" id="bulkLiveAdsDot"></span>
+              <span class="live-label">Ads</span>
+              <span class="live-status" id="bulkLiveAdsStatus">Waiting</span>
+            </div>
           </div>
 
           <button id="syncBulk">
@@ -1109,6 +1122,7 @@
           <div class="progress-failures" id="progressFailures"></div>
           <div class="progress-error" id="progressError"></div>
           <div class="progress-done" id="progressDone"></div>
+          <div class="progress-note" id="progressNote" style="display:none;"></div>
           <button id="retryFailedBtn" type="button" style="display:none;">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
             <span id="retryFailedLabel">Retry Failed Only</span>

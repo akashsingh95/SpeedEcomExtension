@@ -368,7 +368,6 @@ async function fetchFileOnce(task, tabId) {
   else if (task.kind === 'payments') msg = { type: 'FETCH_PAYMENTS_FILE', reportId: task.reportId };
   else if (task.kind === 'gst') msg = { type: 'FETCH_GST_FILE', documentId: task.documentId, dateRangeCovered: task.dateRangeCovered, reportType: task.reportType };
   else if (task.kind === 'fbaReturns') msg = { type: 'FETCH_FBA_RETURNS_FILE', referenceId: task.referenceId };
-  else if (task.kind === 'ads') msg = { type: 'FETCH_ADS_FILE', urlString: task.urlString };
   else msg = { type: 'FETCH_ORDER_FILE', referenceId: task.referenceId };
   const resp = await sendToTabWithRecovery(tabId, msg);
   if (!resp?.ok) throw new Error(resp?.error || 'Could not fetch the report file.');
@@ -569,6 +568,21 @@ const PAGE_REQUIREMENTS = {
     readyCheck: 'FBA_RETURNS_PAGE_READY',
     neededFor: ['schedule', 'poll'], // both need the page - confirmed, both throw csrfMissing
   },
+  // A different origin from every other requirement here (advertising.amazon.in,
+  // not sellercentral.amazon.in) - originPattern lets findReadyTabForRequirement
+  // search the right one. Confirmed live: navigating straight to this bare
+  // URL (no entityId) auto-redirects to the seller's own
+  // https://.../reports?entityId=... - same "fixed URL, no learning needed"
+  // shape as `returns` above, not `fbaReturns`'s learned-URL shape.
+  // cachePageUrl('ads', ...) calls elsewhere stay harmless no-ops (same as
+  // `returns`'s own redundant caching), kept for consistency.
+  ads: {
+    label: 'Ads Reports',
+    url: 'https://advertising.amazon.in/reports',
+    originPattern: 'https://advertising.amazon.in/*',
+    readyCheck: 'ADS_PAGE_READY',
+    neededFor: ['schedule'],
+  },
 };
 
 async function getCachedPageUrl(cat) {
@@ -594,7 +608,7 @@ async function checkPageReady(tabId, requirement) {
 // Covers the case where the user already has the right page open themselves
 // (in any tab) - reusing it means no navigation/new tab is needed at all.
 async function findReadyTabForRequirement(requirement) {
-  const tabs = await chrome.tabs.query({ url: 'https://sellercentral.amazon.in/*' });
+  const tabs = await chrome.tabs.query({ url: requirement.originPattern || 'https://sellercentral.amazon.in/*' });
   for (const tab of tabs) {
     if (await checkPageReady(tab.id, requirement)) return tab.id;
   }
@@ -687,6 +701,42 @@ async function releaseNavTab(job) {
   job.navTabFor = null;
 }
 
+// Ads' own single-tab job (like Orders/Payments/GST) only needs to resolve a
+// tab once at sync start, not per-category like Bulk - so this is a smaller
+// standalone version of resolvePageForCategory's same three-tier strategy
+// (already-open tab -> cached/learned URL -> give up and ask the user to
+// open it once), not routed through Bulk's job.navTabId bookkeeping.
+async function resolveAdsTab() {
+  const requirement = PAGE_REQUIREMENTS.ads;
+  const existing = await findReadyTabForRequirement(requirement);
+  if (existing) return { tabId: existing, opened: false };
+
+  const url = requirement.url || (await getCachedPageUrl('ads'));
+  if (!url) return { tabId: null, opened: false };
+
+  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    await navigateAndPreparePage(tab.id, requirement, url);
+  } catch (e) {
+    // Unlike resolvePageForCategory (which mutates a job object the caller
+    // already owns, so a later releaseNavTab can still find and close it
+    // even mid-throw), this tab was just created and nothing else knows
+    // about it yet - clean it up here instead of leaving it orphaned.
+    try { await chrome.tabs.remove(tab.id); } catch (_) {}
+    throw e;
+  }
+  return { tabId: tab.id, opened: true };
+}
+
+// Only closes the tab this run opened itself (mirrors releaseNavTab) - a tab
+// the user already had open (resolveAdsTab's `opened: false` case) is never
+// touched.
+async function releaseAdsTab(job) {
+  if (job?.navTabId && job?.navTabOwned) {
+    try { await chrome.tabs.remove(job.navTabId); } catch (_) {}
+  }
+}
+
 // Sanitizes a single name component (the tenant/business name) the same way
 // Meesho's safeName() does, so the two marketplaces' ZIP filenames follow one
 // consistent pattern: "<Marketplace>_<Type>_<Shop>_<from>_to_<to>.zip".
@@ -700,9 +750,9 @@ function safeName(s) {
 }
 
 // The Speed Ecom account's registered business/company name (shown in the
-// account bar) - the only shop/seller name already available here, since
-// unlike Meesho this extension has no code that scrapes a store name off
-// Seller Central itself.
+// account bar) - fallback only now (see fetchSellerAccountName below), used
+// when the live Amazon account name can't be scraped (different origin like
+// advertising.amazon.in, dead tab, page structure changed, etc).
 async function getTenantName() {
   let auth;
   try {
@@ -713,13 +763,31 @@ async function getTenantName() {
   return safeName(auth?.user?.tenant || auth?.user?.name || 'Seller');
 }
 
+// A SpeedEcom tenant can run more than one Amazon Seller Central account, so
+// the ZIP name needs to reflect whichever account was actually open at sync
+// time, not the (single, tenant-wide) SpeedEcom account name - otherwise
+// ZIPs from different Amazon accounts under the same tenant are
+// indistinguishable by filename. `null` (not a thrown error) means "couldn't
+// scrape it" - a dead tab, a different origin (Ads), or the page's markup
+// having changed - so the caller can fall back to the tenant name instead of
+// failing the whole zip.
+async function fetchSellerAccountName(tabId) {
+  try {
+    const resp = await sendToTabWithRecovery(tabId, { type: 'GET_SELLER_ACCOUNT_NAME' });
+    return resp?.name || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Builds the outer ZIP's filename. No more user-editable "Zip File Name"
 // field - it's always derived from the shop name and the requested date
 // range, same idea as Meesho's Meesho_<Shop>_<from>_to_<to>.zip. `label`
 // distinguishes Amazon's several report types (Orders/Payments/GST/...),
 // which Meesho doesn't need since it only has one sync flow.
-async function buildZipName(label, fromDate, toDate, isRetry) {
-  const tenant = await getTenantName();
+async function buildZipName(label, fromDate, toDate, isRetry, tabId) {
+  const scraped = tabId ? await fetchSellerAccountName(tabId) : null;
+  const tenant = scraped ? safeName(scraped) : await getTenantName();
   const base = `Amazon_${label}_${tenant}_${fromDate}_to_${toDate}`;
   return isRetry ? `${base}_Retry` : base;
 }
@@ -765,9 +833,6 @@ function isoToSlashYMD(iso) {
   return iso.replace(/-/g, '/');
 }
 
-function buildAdsFilename(fromDate, toDate, ext) {
-  return fromDate === toDate ? `Ads_SearchTerm_${fromDate}${ext}` : `Ads_SearchTerm_${fromDate}_to_${toDate}${ext}`;
-}
 
 // ── Orders report engine ────────────────────────────────────────────────────
 // Confirmed live: All Orders -> Order Date -> Exact dates -> Request. No
@@ -858,7 +923,7 @@ async function orderSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildOrderFilename(job.fromDate, job.toDate, '.txt');
       const tasks = [{ referenceId: job.referenceId, filename, zipFolder: 'Orders' }];
-      const state = await processDownloadQueue(tasks, await buildZipName('Orders', job.fromDate, job.toDate), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('Orders', job.fromDate, job.toDate, undefined, job.tabId), job.tabId);
       await recordLastSync('Orders', state);
       await clearOrderJob();
       return;
@@ -1023,7 +1088,7 @@ async function paymentsSyncTick() {
     if (job.phase === 'downloading') {
       const filename = buildPaymentsFilename(job.fromDate, job.toDate, '.csv');
       const tasks = [{ reportId: job.reportId, filename, zipFolder: 'Payments', kind: 'payments' }];
-      const state = await processDownloadQueue(tasks, await buildZipName('Payments', job.fromDate, job.toDate), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('Payments', job.fromDate, job.toDate, undefined, job.tabId), job.tabId);
       await recordLastSync('Payments', state);
       await clearPaymentsJob();
       return;
@@ -1314,7 +1379,7 @@ async function gstSyncTick() {
         return;
       }
 
-      const state = await processDownloadQueue(tasks, await buildZipName('GST', job.fromDate, job.toDate, job.isRetry), job.tabId);
+      const state = await processDownloadQueue(tasks, await buildZipName('GST', job.fromDate, job.toDate, job.isRetry, job.tabId), job.tabId);
       if (failures.length && !state.cancelled) {
         // `failures` here are types that never made it into `tasks` at all
         // (failed during scheduling/polling, before processDownloadQueue
@@ -1406,7 +1471,7 @@ async function fetchFbaReturnsReportStatus(tabId, referenceId) {
 // FBA Returns' own individual sync also runs through the Bulk engine now -
 // see the note above scheduleReturnsReport's now-removed standalone tick.
 
-// ── Sponsored Ads Reports engine (Sponsored Products -> Search term) ───────
+// ── Sponsored Ads Reports engine (Sponsored Products -> Advertised product) ─
 // A completely different origin (advertising.amazon.in, not
 // sellercentral.amazon.in) and a completely different app from every engine
 // above - confirmed live through an extensive investigation (a static CSRF
@@ -1422,44 +1487,50 @@ async function fetchFbaReturnsReportStatus(tabId, referenceId) {
 // exact relative download path once status is "COMPLETED", so there's no
 // separate resolve step before downloading, unlike Orders/Payments/GST.
 //
-// Confirmed live: max lookback is 65 days for this specific report type
-// (Sponsored Products -> Search term), per the account's own reportMetadata
-// catalog - other report types have very different caps (Campaign: 2192
-// days, Purchased product: 60 days) but only Search term is in scope here.
+// Max lookback: confirmed live at 90 days for Advertised Product (the real
+// date picker's earliest selectable date was exactly 90 days back from
+// today, 21 May - 18 Aug) - different from Search Term's separately-
+// confirmed 65 days, since report types on this app have very different
+// caps (e.g. Campaign: 2192 days, Purchased product: 60 days). See
+// MAX_ADS_LOOKBACK_DAYS in popup.js. 90 is correct as-is - a live 400 at
+// this exact boundary ("Report start date... is beyond the maximum look
+// back days: 90") turned out to be a timestamp-construction bug, not a
+// wrong day count: comparing our rejected payload against Amazon's own
+// client's successful one for the identical calendar range showed Amazon
+// sends plain UTC-midnight timestamps for both dates (e.g. reportStartDate
+// 1779321600000 = 2026-05-21T00:00:00Z), while this code was appending
+// +05:30 (and end-of-day for the end date) - a 5.5-hour offset that pushed
+// the start timestamp just past the real floor even on a calendar day
+// Amazon's own picker allows. Fixed by matching Amazon's exact construction
+// below (plain UTC midnight for both ends) instead of shrinking the range.
 // The same 2-days-back generation-delay cutoff used elsewhere is applied by
 // direct instruction, not separately confirmed evidence of the same quirk on
 // this specific endpoint.
 
 async function scheduleAdsReport(tabId, { fromDate, toDate }) {
-  const startDate = new Date(`${fromDate}T00:00:00+05:30`).getTime();
-  const endDate = new Date(`${toDate}T23:59:59.999+05:30`).getTime();
+  const startDate = new Date(`${fromDate}T00:00:00Z`).getTime();
+  const endDate = new Date(`${toDate}T00:00:00Z`).getTime();
   const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_ADS_REPORT', startDate, endDate });
   if (!resp?.ok) throw new Error(resp?.error || 'Could not schedule the Ads report.');
   if (resp.entityIdMissing) throw new Error("Open Seller Central's Advertising → Reports page (or the Amazon Ads console's Reports page) in this tab, then try again.");
   if (resp.csrfMissing) throw new Error('Open the Ads Reports page in this tab, then try again.');
   if (resp.status >= 400) throw new Error(`Amazon rejected the request (HTTP ${resp.status}).`);
   if (!resp.reportId) throw new Error('Report scheduling did not return a report id.');
+  await cachePageUrl('ads', resp.pageUrl);
   return resp.reportId;
-}
-
-async function fetchAdsSubscriptionsList(tabId) {
-  const resp = await sendToTabWithRecovery(tabId, { type: 'FETCH_ADS_LIST' });
-  if (!resp?.ok) throw new Error(resp?.error || 'Could not read the Ads report list.');
-  if (resp.entityIdMissing) throw new Error("Open Seller Central's Advertising → Reports page (or the Amazon Ads console's Reports page) in this tab, then try again.");
-  if (resp.csrfMissing) throw new Error('Open the Ads Reports page in this tab, then try again.');
-  if (resp.status >= 400) throw new Error(`Amazon returned HTTP ${resp.status} for the Ads report list.`);
-  return resp.body?.subscriptions || [];
 }
 
 let tickInFlightAds = false;
 async function adsSyncTick() {
   if (tickInFlightAds) return;
   tickInFlightAds = true;
+  let job;
   try {
-    const job = await getAdsJob();
+    job = await getAdsJob();
     if (!job) { await chrome.alarms.clear(ADS_TICK_ALARM_NAME); return; }
 
     if (job.cancelled) {
+      await releaseAdsTab(job);
       await clearAdsJob();
       await setProgress(newState({ finished: true, cancelled: true, current: 'Cancelled - no files were downloaded yet.' }));
       return;
@@ -1469,49 +1540,28 @@ async function adsSyncTick() {
       return;
     }
 
+    // Amazon takes a minimum of ~15 minutes to actually generate this
+    // report - per direct instruction, this no longer waits for it at all.
+    // 'scheduling' is the only real phase: fire the request, then finish
+    // immediately. The seller checks Amazon's own Ads Reports page later to
+    // download it manually. recordLastSync is deliberately not called here -
+    // it would write "1 file" to the Last Synced bar, which would be wrong
+    // since nothing was actually downloaded.
     if (job.phase === 'scheduling') {
       await setProgress(newState({ current: 'Requesting Ads report...' }));
-      const reportId = await scheduleAdsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
-      await setAdsJob({ ...job, phase: 'polling', reportId });
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the Ads report...' }));
-      return;
-    }
-
-    if (job.phase === 'polling') {
-      const subscriptions = await fetchAdsSubscriptionsList(job.tabId);
-      const found = subscriptions.find((s) => s.id === job.reportId);
-      const summary = found?.latestProcessedReportSummary;
-      if (summary?.status === 'COMPLETED') {
-        if (!summary.urlString) {
-          await clearAdsJob();
-          await setProgress(newState({ finished: true, error: 'No data was found for that date range.' }));
-          return;
-        }
-        await setAdsJob({ ...job, phase: 'downloading', urlString: summary.urlString });
-        return; // next tick actually downloads - keeps every tick short
-      }
-      if (summary?.status && /FAIL|ERROR|CANCEL/i.test(summary.status)) {
-        throw new Error(`Ads report ${summary.status.toLowerCase()}. Try again.`);
-      }
-      const waitedMs = Date.now() - job.startedAt;
-      if (waitedMs > 50 * 60 * 1000) {
-        throw new Error('The Ads report did not finish generating within the expected time. Try again shortly.');
-      }
-      // still PENDING, or not found yet in the list
-      await setProgress(newState({ current: 'Waiting for Amazon to generate the Ads report...' }));
-      return;
-    }
-
-    if (job.phase === 'downloading') {
-      const filename = buildAdsFilename(job.fromDate, job.toDate, '.xlsx');
-      const tasks = [{ urlString: job.urlString, filename, zipFolder: 'Ads', kind: 'ads' }];
-      const state = await processDownloadQueue(tasks, await buildZipName('Ads', job.fromDate, job.toDate), job.tabId);
-      await recordLastSync('Ads', state);
+      await scheduleAdsReport(job.tabId, { fromDate: job.fromDate, toDate: job.toDate });
+      await releaseAdsTab(job);
       await clearAdsJob();
+      await setProgress(newState({
+        finished: true, total: 1, done: 1, requestedOnly: true,
+        current: 'Report requested.',
+        note: 'Amazon takes 15+ minutes to generate this report - open the Ads Reports page (advertising.amazon.in) to download it manually.',
+      }));
       return;
     }
   } catch (e) {
     console.warn(TAG, 'ads sync failed:', e?.message);
+    await releaseAdsTab(job);
     await clearAdsJob();
     await setProgress(newState({ finished: true, error: e?.message || 'Ads sync failed.' }));
   } finally {
@@ -1525,10 +1575,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-async function startAdsSync({ fromDate, toDate, tabId }) {
+async function startAdsSync({ fromDate, toDate, tabId, navTabId, navTabOwned }) {
   await setAdsJob({
     phase: 'scheduling',
     fromDate, toDate, tabId,
+    navTabId: navTabId || null,
+    navTabOwned: !!navTabOwned,
     reportId: null,
     paused: false,
     cancelled: false,
@@ -1565,11 +1617,13 @@ async function startAdsSync({ fromDate, toDate, tabId }) {
 // category (Orders/Payments/GST) has no page requirement and keeps using
 // job.tabId directly, unchanged.
 //
-// Ads is deliberately still left out of Bulk - it's a different origin
-// entirely (advertising.amazon.in, not sellercentral.amazon.in), so it
-// needs its own separately-resolved tab rather than sharing job.tabId,
-// which the current one-shared-tab design doesn't support yet.
-const BULK_CATEGORY_LABELS = { orders: 'Orders', payments: 'Payments', gstB2B: 'GST B2B', gstB2C: 'GST B2C', returns: 'Returns', fbaReturns: 'FBA Returns' };
+// Ads is a different origin entirely (advertising.amazon.in, not
+// sellercentral.amazon.in), but resolves through the exact same
+// resolvePageForCategory system as Returns/FBA Returns (PAGE_REQUIREMENTS.ads
+// carries its own originPattern) - it just never enters 'polling' (see the
+// scheduling loop below), since per direct instruction this only fires the
+// request and doesn't wait ~15+ minutes for Amazon to generate it.
+const BULK_CATEGORY_LABELS = { orders: 'Orders', payments: 'Payments', gstB2B: 'GST B2B', gstB2C: 'GST B2C', returns: 'Returns', fbaReturns: 'FBA Returns', ads: 'Ads' };
 // gstB2B/gstB2C are two independent categories rather than one 'gst' entry
 // with a radio choice - B2B and B2C are just two different reportType values
 // against the same create/list endpoints (see GST_TYPE_REPORT_TYPE above),
@@ -1580,6 +1634,7 @@ function bulkStatusText(categories, sub) {
     const label = BULK_CATEGORY_LABELS[c];
     const phase = sub[c]?.phase;
     if (phase === 'ready') return `${label}: ready`;
+    if (phase === 'requested') return `${label}: requested`;
     if (phase === 'empty') return `${label}: no data`;
     if (phase === 'failed') return `${label}: failed`;
     if (phase === 'scheduling') return `${label}: requesting...`;
@@ -1650,9 +1705,21 @@ async function bulkSyncTick() {
             const fbaTabId = await resolvePageForCategory(job, cat, 'schedule');
             const referenceId = await scheduleFbaReturnsReport(fbaTabId, { fromDate: job.fromDate, toDate: job.toDate });
             sub[cat] = { phase: 'polling', referenceId };
+          } else if (cat === 'ads') {
+            // No 'polling' step at all - jumps straight to 'requested', same
+            // shape as the GST Monthly branch above skipping polling for a
+            // different reason (nothing to poll: Amazon takes ~15+ minutes
+            // to generate this report and per direct instruction this
+            // doesn't wait for it).
+            const adsTabId = await resolvePageForCategory(job, cat, 'schedule');
+            const adsReportId = await scheduleAdsReport(adsTabId, { fromDate: job.fromDate, toDate: job.toDate });
+            const adsTabInfo = await chrome.tabs.get(adsTabId).catch(() => null);
+            console.log(TAG, `bulk: ads report requested - id=${adsReportId} tabId=${adsTabId} tabUrl=${adsTabInfo?.url}`);
+            sub[cat] = { phase: 'requested' };
           }
         } catch (e) {
           sub[cat] = { phase: 'failed', error: e?.message || 'Could not request this report.' };
+          console.warn(TAG, `bulk: ${cat} failed -`, sub[cat].error);
         }
       }
       await setBulkJob({ ...job, sub, phase: 'polling' });
@@ -1740,6 +1807,7 @@ async function bulkSyncTick() {
       const tasks = [];
       const failures = [];
       const noData = [];
+      const requested = [];
       for (const cat of categories) {
         const s = sub[cat];
         if (s.phase === 'ready') {
@@ -1770,6 +1838,8 @@ async function bulkSyncTick() {
           } else if (cat === 'fbaReturns') {
             tasks.push({ referenceId: s.referenceId, filename: buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'FBA_Returns', kind: 'fbaReturns', cat });
           }
+        } else if (s.phase === 'requested') {
+          requested.push({ cat, label: BULK_CATEGORY_LABELS[cat] });
         } else if (s.phase === 'empty') {
           noData.push({ cat, label: BULK_CATEGORY_LABELS[cat], reason: s.error });
         } else if (s.phase === 'failed') {
@@ -1777,7 +1847,7 @@ async function bulkSyncTick() {
         }
       }
 
-      if (!tasks.length) {
+      if (!tasks.length && !requested.length) {
         await clearBulkJob();
         const parts = [
           ...failures.map((f) => `${f.label}: ${f.reason}`),
@@ -1790,7 +1860,23 @@ async function bulkSyncTick() {
         return;
       }
 
-      const state = await processDownloadQueue(tasks, await buildZipName(job.label || 'Bulk', job.fromDate, job.toDate, job.isRetry), job.tabId);
+      const requestedNote = requested.length
+        ? requested.map((r) => `${r.label}: report requested - Amazon takes 15+ minutes to generate it, check the Reports page to download it manually.`).join(' | ')
+        : null;
+
+      if (!tasks.length) {
+        // Only requested-only categories succeeded (e.g. a Bulk run with
+        // just Ads selected) - nothing to actually download, so skip
+        // processDownloadQueue (it would just no-op with done:0) and report
+        // success directly, same shape as the standalone Ads path.
+        await releaseNavTab(job);
+        await clearBulkJob();
+        await setProgress(newState({ finished: true, total: 1, done: 1, requestedOnly: true, current: 'Report requested.', note: requestedNote }));
+        return;
+      }
+
+      const state = await processDownloadQueue(tasks, await buildZipName(job.label || 'Bulk', job.fromDate, job.toDate, job.isRetry, job.tabId), job.tabId);
+      if (requestedNote) state.note = requestedNote;
       if (failures.length && !state.cancelled) {
         // `failures` here are categories that never made it into `tasks` at
         // all (failed during scheduling/polling, before processDownloadQueue
@@ -2087,14 +2173,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         // A different origin from every other category - the Ads Reports
         // page lives on advertising.amazon.in, not sellercentral.amazon.in.
-        const tabs = await chrome.tabs.query({ url: 'https://advertising.amazon.in/*' });
-        if (!tabs.length) {
-          await setProgress(newState({ finished: true, error: 'Open the Amazon Ads Reports page (advertising.amazon.in) first - via Seller Central → Reports → Advertising.' }));
+        // resolveAdsTab reuses an already-open tab, or silently opens/reuses
+        // one from a previously-learned URL (see PAGE_REQUIREMENTS.ads) -
+        // only the very first-ever run (nothing learned yet) needs the user
+        // to have opened the page manually.
+        const { tabId: resolvedTabId, opened } = await resolveAdsTab();
+        if (!resolvedTabId) {
+          await setProgress(newState({ finished: true, error: 'Open the Amazon Ads Reports page (advertising.amazon.in) first - via Seller Central → Reports → Advertising. After that, future syncs will open it automatically.' }));
           return;
         }
-        const tab = tabs.find((t) => t.active) || tabs[0];
 
-        if (!(await ensureContentScript(tab.id))) {
+        if (!(await ensureContentScript(resolvedTabId))) {
           await setProgress(newState({ finished: true, error: 'Could not connect to the Ads Reports tab. Please reload the page and try again.' }));
           return;
         }
@@ -2110,7 +2199,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         console.log(TAG, `starting ads sync: ${fromDate} to ${toDate}`);
-        await startAdsSync({ fromDate, toDate, tabId: tab.id });
+        await startAdsSync({ fromDate, toDate, tabId: resolvedTabId, navTabId: opened ? resolvedTabId : null, navTabOwned: opened });
       } catch (e) {
         console.warn(TAG, 'ads sync failed to start:', e?.message);
         await setProgress(newState({ finished: true, error: e?.message || 'Sync failed.' }));
