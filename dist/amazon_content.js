@@ -418,36 +418,145 @@
 
   const ADS_MARKETPLACE_ID = 'A21TJRUUN4KGV';
 
-  // columns/translationsMap/reportMetadata are fixed for this exact report
-  // (Sponsored Products -> Advertised product) - confirmed live via a full
-  // request-payload capture of a real create-report submission, unaffected
-  // by which dates are picked. reportPeriod becomes "CUSTOM" for a real date
-  // range (vs. a named preset like "LAST_30_DAYS") - confirmed live earlier
-  // for the Search Term report (same app, same shape) by capturing the same
-  // call with a manually-picked date range instead of a preset.
-  const ADS_ADVERTISED_PRODUCT_COLUMNS = [
-    'startDate', 'endDate', 'portfolioName', 'campaignBudgetCurrencyCode', 'campaignName',
-    'adGroupName', 'marketplaceId', 'advertisedSku', 'advertisedAsin', 'impressions',
-    'clicks', 'clickThroughRate', 'costPerClick', 'spend', 'sales7d', 'acosClicks7d',
-    'roasClicks7d', 'purchases7d', 'unitsSoldClicks7d', 'purchaseClickRate7d',
-    'unitsSoldSameSku7d', 'unitsSoldOtherSku7d', 'attributedSalesSameSku7d', 'salesOtherSku7d',
-  ];
-  const ADS_ADVERTISED_PRODUCT_TRANSLATIONS = {
-    startDate: 'Start Date', endDate: 'End Date', portfolioName: 'portfolioName',
-    campaignBudgetCurrencyCode: 'Currency - not converted', campaignName: 'Campaign Name',
-    adGroupName: 'Ad Group Name', marketplaceId: 'marketplaceId', advertisedSku: 'advertisedSku',
-    advertisedAsin: 'advertisedAsin', impressions: 'Impressions',
-    clicks: 'Clicks', clickThroughRate: 'clickThroughRate', costPerClick: 'costPerClick',
-    spend: 'Spend', sales7d: '7 Day Total Sales - not converted', acosClicks7d: 'acosClicks7d',
-    roasClicks7d: 'roasClicks7d', purchases7d: 'purchases7d', unitsSoldClicks7d: 'unitsSoldClicks7d',
-    purchaseClickRate7d: 'purchaseClickRate7d', unitsSoldSameSku7d: 'unitsSoldSameSku7d',
-    unitsSoldOtherSku7d: 'unitsSoldOtherSku7d', attributedSalesSameSku7d: 'attributedSalesSameSku7d',
-    salesOtherSku7d: 'salesOtherSku7d',
+  // Three report shapes, one per category the seller wants (Sponsored TV
+  // excluded by direct instruction) - each confirmed live via a full
+  // request-payload capture of a real create-report submission (Run report
+  // -> Network tab -> Copy as cURL), unaffected by which dates are picked.
+  // columns/translationsMap are entirely different per shape, not just a
+  // different subset of one shared list - notably Sponsored Display's use
+  // snake_case field names (first_timestamp, portfolio_name, ...) where the
+  // other two use camelCase - so each is kept as its own fully independent,
+  // literally-captured payload rather than trying to derive one from
+  // another. reportPeriod becomes "CUSTOM" for a real date range (vs. a
+  // named preset like "LAST_30_DAYS", which is what these were captured
+  // with) - confirmed live earlier for the Search Term report (same app,
+  // same shape) by capturing the same call with a manually-picked date
+  // range instead of a preset.
+  const ADS_REPORT_SHAPES = {
+    // Sponsored Products -> Advertised product
+    sp: {
+      reportName: 'Sponsored Products Advertised product report',
+      reportType: 'adProducts',
+      reportCategoryId: 'sp',
+      filterTypes: ['marketplaceIds', 'mrcAccreditationStatus'],
+      columns: [
+        'startDate', 'endDate', 'portfolioName', 'campaignBudgetCurrencyCode', 'campaignName',
+        'adGroupName', 'marketplaceId', 'advertisedSku', 'advertisedAsin', 'impressions',
+        'clicks', 'clickThroughRate', 'costPerClick', 'spend', 'sales7d', 'acosClicks7d',
+        'roasClicks7d', 'purchases7d', 'unitsSoldClicks7d', 'purchaseClickRate7d',
+        'unitsSoldSameSku7d', 'unitsSoldOtherSku7d', 'attributedSalesSameSku7d', 'salesOtherSku7d',
+      ],
+      translationsMap: {
+        startDate: 'Start Date', endDate: 'End Date', portfolioName: 'portfolioName',
+        campaignBudgetCurrencyCode: 'Currency - not converted', campaignName: 'Campaign Name',
+        adGroupName: 'Ad Group Name', marketplaceId: 'marketplaceId', advertisedSku: 'advertisedSku',
+        advertisedAsin: 'advertisedAsin', impressions: 'Impressions',
+        clicks: 'Clicks', clickThroughRate: 'clickThroughRate', costPerClick: 'costPerClick',
+        spend: 'Spend', sales7d: '7 Day Total Sales - not converted', acosClicks7d: 'acosClicks7d',
+        roasClicks7d: 'roasClicks7d', purchases7d: 'purchases7d', unitsSoldClicks7d: 'unitsSoldClicks7d',
+        purchaseClickRate7d: 'purchaseClickRate7d', unitsSoldSameSku7d: 'unitsSoldSameSku7d',
+        unitsSoldOtherSku7d: 'unitsSoldOtherSku7d', attributedSalesSameSku7d: 'attributedSalesSameSku7d',
+        salesOtherSku7d: 'salesOtherSku7d',
+      },
+    },
+    // Sponsored Brands -> Campaign
+    hsa: {
+      reportName: 'Sponsored Brands Campaign report',
+      reportType: 'campaigns',
+      reportCategoryId: 'hsa',
+      filterTypes: ['marketplaceIds'],
+      columns: [
+        'startDate', 'endDate', 'portfolioName', 'campaignBudgetCurrencyCode', 'campaignName', 'costType',
+        'marketplaceId', 'impressions', 'clicks', 'clickThroughRate', 'costPerClick', 'spend',
+        'totalAcos14d', 'totalRoas14d', 'totalSales14d', 'purchaseCount14d', 'totalUnitsSold14d',
+        'purchaseClickRate14d', 'viewableImpressions', 'vcpm', 'vtr', 'vctr',
+        'richMediaEvent68Count', 'richMediaEvent70Count', 'richMediaEvent78Count', 'richMediaEvent66Count',
+        'richMediaEvent79Count', 'richMediaEvent8193Count', 'video5SecondViewRate', 'brandSearchCount14d',
+        'totalDpvCount14d', 'newToBrandPurchases', 'newToBrandPurchasesPercentage', 'newToBrandSales',
+        'newToBrandSalesPercentage', 'newToBrandUnitsSold', 'newToBrandUnitsSoldPercentage',
+        'newToBrandPurchasesRate', 'acosClicks14d', 'roasClicks14d', 'sales14d', 'purchases14d',
+        'unitsSoldClicks14d', 'newToBrandDetailPageViews', 'newToBrandDetailPageViewClicks',
+        'newToBrandDetailPageViewRate', 'newToBrandECPDetailPageView', 'brandStorePageView', 'addToCart',
+        'addToCartClicks', 'addToCartRate', 'eCPAddToCart', 'brandedSearchesClicks', 'brandedSearchRate',
+        'eCPBrandSearch', 'longTermSales', 'longTermROAS',
+      ],
+      translationsMap: {
+        startDate: 'Start Date', endDate: 'End Date', portfolioName: 'portfolioName',
+        campaignBudgetCurrencyCode: 'Currency - not converted', campaignName: 'Campaign Name',
+        costType: 'costType', marketplaceId: 'marketplaceId', impressions: 'Impressions', clicks: 'Clicks',
+        clickThroughRate: 'clickThroughRate', costPerClick: 'costPerClick', spend: 'Spend',
+        totalAcos14d: 'totalAcos14d', totalRoas14d: 'totalRoas14d', totalSales14d: 'totalSales14d',
+        purchaseCount14d: 'purchaseCount14d', totalUnitsSold14d: 'totalUnitsSold14d',
+        purchaseClickRate14d: 'purchaseClickRate14d', viewableImpressions: 'viewableImpressions',
+        vcpm: 'Cost per 1,000 viewable impressions (VCPM)', vtr: 'View-Through Rate (VTR)',
+        vctr: 'Click-Through Rate for Views (vCTR)', richMediaEvent68Count: 'richMediaEvent68Count',
+        richMediaEvent70Count: 'richMediaEvent70Count', richMediaEvent78Count: 'richMediaEvent78Count',
+        richMediaEvent66Count: 'richMediaEvent66Count', richMediaEvent79Count: 'richMediaEvent79Count',
+        richMediaEvent8193Count: 'richMediaEvent8193Count', video5SecondViewRate: 'video5SecondViewRate',
+        brandSearchCount14d: 'brandSearchCount14d', totalDpvCount14d: 'totalDpvCount14d',
+        newToBrandPurchases: 'newToBrandPurchases', newToBrandPurchasesPercentage: 'newToBrandPurchasesPercentage',
+        newToBrandSales: 'newToBrandSales', newToBrandSalesPercentage: 'newToBrandSalesPercentage',
+        newToBrandUnitsSold: 'newToBrandUnitsSold', newToBrandUnitsSoldPercentage: 'newToBrandUnitsSoldPercentage',
+        newToBrandPurchasesRate: 'newToBrandPurchasesRate', acosClicks14d: 'acosClicks14d',
+        roasClicks14d: 'roasClicks14d', sales14d: '14 Day Total Sales - not converted', purchases14d: 'purchases14d',
+        unitsSoldClicks14d: 'unitsSoldClicks14d', newToBrandDetailPageViews: 'newToBrandDetailPageViews',
+        newToBrandDetailPageViewClicks: 'newToBrandDetailPageViewClicks',
+        newToBrandDetailPageViewRate: 'newToBrandDetailPageViewRate',
+        newToBrandECPDetailPageView: 'newToBrandECPDetailPageView', brandStorePageView: 'brandStorePageView',
+        addToCart: 'addToCart', addToCartClicks: 'addToCartClicks', addToCartRate: 'addToCartRate',
+        eCPAddToCart: 'eCPAddToCart', brandedSearchesClicks: 'brandedSearchesClicks',
+        brandedSearchRate: 'Branded search rate', eCPBrandSearch: 'eCPBrandSearch',
+        longTermSales: 'longTermSales', longTermROAS: 'longTermROAS',
+      },
+    },
+    // Sponsored Display -> Advertised product
+    sd: {
+      reportName: 'Sponsored Display Advertised product report',
+      reportType: 'adProducts',
+      reportCategoryId: 'sd',
+      filterTypes: ['fenix', 'advertiserId', 'marketplaceId', 'adProductTypeCode'],
+      columns: [
+        'first_timestamp', 'last_timestamp', 'portfolio_name', 'campaign_budget_currency', 'campaign_name',
+        'campaign_price_type_code', 'ad_name', 'ad_optimization_type', 'ad_creative_sku', 'ad_creative_asin',
+        'impressions', 'viewable_impressions', 'clicks', 'ctr', 'total_dpv_count_14d', 'total_cost', 'cpc',
+        'vcpm', 'total_acos_14d', 'total_roas_14d', 'purchase_count_14d', 'total_units_sold_14d',
+        'total_sales_14d', 'sd_ntb_cutover_ntb_purchase_count_14d', 'sd_ntb_cutover_total_ntb_sales_14d',
+        'sd_ntb_cutover_total_ntb_units_sold_14d', 'total_acos_from_clicks_14d', 'total_roas_from_clicks_14d',
+        'purchase_click_count_14d', 'total_units_sold_from_clicks_14d', 'total_sales_from_clicks_14d',
+        'ntb_purchase_click_count_14d', 'total_ntb_sales_from_clicks_14d', 'total_ntb_units_sold_from_clicks_14d',
+      ],
+      translationsMap: {
+        first_timestamp: 'Start Date', last_timestamp: 'End Date', portfolio_name: 'Portfolio name',
+        campaign_budget_currency: 'Currency', campaign_name: 'Campaign Name',
+        campaign_price_type_code: 'Cost Type', ad_name: 'Ad Group Name', ad_optimization_type: 'Bid Optimisation',
+        ad_creative_sku: 'Advertised SKU', ad_creative_asin: 'Advertised ASIN', impressions: 'Impressions',
+        viewable_impressions: 'Viewable Impressions', clicks: 'Clicks', ctr: 'Click-Thru Rate (CTR)',
+        total_dpv_count_14d: '14 Day Detail Page Views (DPV)', total_cost: 'Spend',
+        cpc: 'Cost Per Click (CPC)', vcpm: 'Cost per 1,000 viewable impressions (VCPM)',
+        total_acos_14d: 'Total Advertising Cost of Sales (ACOS)',
+        total_roas_14d: 'Total Return on Advertising Spend (ROAS)', purchase_count_14d: '14 Day Total Orders (#)',
+        total_units_sold_14d: '14 Day Total Units (#)', total_sales_14d: '14 Day Total Sales (₹)',
+        sd_ntb_cutover_ntb_purchase_count_14d: '14 Day New-to-brand Orders (#)',
+        sd_ntb_cutover_total_ntb_sales_14d: '14 Day New-to-brand Sales (₹)',
+        sd_ntb_cutover_total_ntb_units_sold_14d: '14 Day New-to-brand Units (#)',
+        total_acos_from_clicks_14d: 'Total Advertising Cost of Sales (ACOS) – (Click)',
+        total_roas_from_clicks_14d: 'Total Return on Advertising Spend (ROAS) – (Click)',
+        purchase_click_count_14d: '14 Day Total Orders (#) – (Click)',
+        total_units_sold_from_clicks_14d: '14 Day Total Units (#) – (Click)',
+        total_sales_from_clicks_14d: '14 Day Total Sales – (Click)',
+        ntb_purchase_click_count_14d: '14 Day New-to-brand Orders (#) – (Click)',
+        total_ntb_sales_from_clicks_14d: '14 Day New-to-brand Sales - (Click)',
+        total_ntb_units_sold_from_clicks_14d: '14 Day New-to-brand Units (#) – (Click)',
+        unallocated: 'Unallocated',
+      },
+    },
   };
 
   // Response is a bare report-id string (not wrapped in JSON) - confirmed
   // live, unlike every other schedule call in this file except Orders/Payments.
-  async function scheduleAdsReport({ startDate, endDate }) {
+  async function scheduleAdsReport({ startDate, endDate, reportKey }) {
+    const shape = ADS_REPORT_SHAPES[reportKey];
+    if (!shape) return { status: 0, error: `Unknown ads report type: ${reportKey}` };
     const entityId = getAdsEntityId();
     if (!entityId) return { status: 0, entityIdMissing: true };
     const csrfToken = getAdsCsrfToken();
@@ -458,24 +567,24 @@
       credentials: 'same-origin',
       headers: { accept: 'application/json, text/plain, */*', 'content-type': 'application/json', 'anti-csrftoken-a2z': csrfToken },
       body: JSON.stringify({
-        reportName: 'Sponsored Products Advertised product report',
-        reportType: 'adProducts',
+        reportName: shape.reportName,
+        reportType: shape.reportType,
         reportPeriod: 'CUSTOM',
         reportStartDate: startDate,
         reportEndDate: endDate,
         reportPeriodTimezone: 'Asia/Calcutta',
         subscriptionDelivery: { frequency: 'SINGLE' },
-        reportMetadata: { reportCategoryId: 'sp', reportTypeId: 'adProducts', templateId: null, templateGuidance: null, timeUnitId: 'summary' },
-        filterTypes: ['marketplaceIds', 'mrcAccreditationStatus'],
+        reportMetadata: { reportCategoryId: shape.reportCategoryId, reportTypeId: shape.reportType, templateId: null, templateGuidance: null, timeUnitId: 'summary' },
+        filterTypes: shape.filterTypes,
         recipients: null,
-        reportCategory: 'sp',
+        reportCategory: shape.reportCategoryId,
         timeUnit: 'summary',
         currencyOfVisualization: null,
-        columns: ADS_ADVERTISED_PRODUCT_COLUMNS,
+        columns: shape.columns,
         marketplaceIds: [ADS_MARKETPLACE_ID],
         campaignSites: null,
         mrcAccreditationStatus: null,
-        translationsMap: ADS_ADVERTISED_PRODUCT_TRANSLATIONS,
+        translationsMap: shape.translationsMap,
       }),
     });
     const text = await res.text();

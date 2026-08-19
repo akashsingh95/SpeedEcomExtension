@@ -1544,10 +1544,72 @@ async function fetchFbaReturnsReportStatus(tabId, referenceId) {
 // direct instruction, not separately confirmed evidence of the same quirk on
 // this specific endpoint.
 
-async function scheduleAdsReport(tabId, { fromDate, toDate }) {
+// Ads reports only make sense whole-month to a seller ("August's ad spend"),
+// not an arbitrary partial range - so in Bulk sync, the picked date range is
+// split into one request per full calendar month it TOUCHES (any overlap,
+// even a single day counts - the picked range only decides which months are
+// in scope, not how much of a month has to be selected), per two rules
+// given by direct instruction:
+//  1. The current (still in progress) month is never requested, regardless
+//     of whether the picked range includes it - its numbers aren't final yet.
+//  2. Any other touched month is requested in FULL (1st through the last
+//     day), even if the picked range only touches part of it (e.g. picking
+//     21 Jul - 17 Aug still requests the whole of July) - UNLESS the whole
+//     month doesn't fit Amazon's 90-day lookback (ADS_LOOKBACK_DAYS, same
+//     value as MAX_ADS_LOOKBACK_DAYS in popup.js), in which case that month
+//     is skipped entirely rather than requesting a truncated partial month.
+// Mirrors gstMonthsInRange's month-walking approach above, just resolving to
+// {fromDate, toDate} pairs (and applying the two filters) instead of bare
+// month/year labels, since these become real report request ranges.
+const ADS_LOOKBACK_DAYS = 90; // matches MAX_ADS_LOOKBACK_DAYS in popup.js
+
+// The three report categories requested per qualifying month in Bulk sync
+// (Sponsored TV excluded by direct instruction) - keys match content.js's
+// ADS_REPORT_SHAPES and Amazon's own reportCategoryId values.
+const ADS_REPORT_KEYS = [
+  { key: 'sp', label: 'Sponsored Products' },
+  { key: 'hsa', label: 'Sponsored Brands' },
+  { key: 'sd', label: 'Sponsored Display' },
+];
+
+function adsMonthlyRanges(fromDate, toDate) {
+  const pad = (v) => String(v).padStart(2, '0');
+  const toIso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+  const start = new Date(`${fromDate}T00:00:00`);
+  const end = new Date(`${toDate}T00:00:00`);
+  const today = new Date();
+  const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1).getTime();
+  const lookbackFloor = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  lookbackFloor.setDate(lookbackFloor.getDate() - (ADS_LOOKBACK_DAYS - 1));
+
+  const ranges = [];
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  while (cursor <= end) {
+    const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0); // last day of the month
+    const isCurrentMonth = monthStart.getTime() === currentMonthStart;
+    const withinLookback = monthStart >= lookbackFloor;
+    if (!isCurrentMonth && withinLookback) {
+      ranges.push({
+        fromDate: toIso(monthStart),
+        toDate: toIso(monthEnd),
+        label: `${GST_MONTH_NAMES[monthStart.getMonth()]}_${monthStart.getFullYear()}`,
+      });
+    }
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+  return ranges;
+}
+
+// reportKey selects which of content.js's ADS_REPORT_SHAPES to request -
+// defaults to 'sp' (Sponsored Products -> Advertised product), the original
+// single shape, so the standalone Ads tab's behavior is unchanged. Bulk
+// sync's own ads branch below passes all three explicitly.
+async function scheduleAdsReport(tabId, { fromDate, toDate, reportKey = 'sp' }) {
   const startDate = new Date(`${fromDate}T00:00:00Z`).getTime();
   const endDate = new Date(`${toDate}T00:00:00Z`).getTime();
-  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_ADS_REPORT', startDate, endDate });
+  const resp = await sendToTabWithRecovery(tabId, { type: 'SCHEDULE_ADS_REPORT', startDate, endDate, reportKey });
   if (!resp?.ok) throw new Error(resp?.error || 'Could not schedule the Ads report.');
   if (resp.entityIdMissing) throw new Error("Open Seller Central's Advertising → Reports page (or the Amazon Ads console's Reports page) in this tab, then try again.");
   if (resp.csrfMissing) throw new Error('Open the Ads Reports page in this tab, then try again.');
@@ -1748,11 +1810,39 @@ async function bulkSyncTick() {
             // different reason (nothing to poll: Amazon takes ~15+ minutes
             // to generate this report and per direct instruction this
             // doesn't wait for it).
+            //
+            // One request per full calendar month the picked range covers
+            // (see adsMonthlyRanges), times one request per report category
+            // in ADS_REPORT_KEYS (Sponsored Products, Sponsored Brands,
+            // Sponsored Display) - not one request for the whole range in a
+            // single category.
             const adsTabId = await resolvePageForCategory(job, cat, 'schedule');
-            const adsReportId = await scheduleAdsReport(adsTabId, { fromDate: job.fromDate, toDate: job.toDate });
-            const adsTabInfo = await chrome.tabs.get(adsTabId).catch(() => null);
-            console.log(TAG, `bulk: ads report requested - id=${adsReportId} tabId=${adsTabId} tabUrl=${adsTabInfo?.url}`);
-            sub[cat] = { phase: 'requested' };
+            const monthRanges = adsMonthlyRanges(job.fromDate, job.toDate);
+            if (!monthRanges.length) {
+              sub[cat] = { phase: 'empty', error: 'No full calendar month in that range (the current month is always excluded).' };
+            } else {
+              let requestedCount = 0;
+              const totalRequests = monthRanges.length * ADS_REPORT_KEYS.length;
+              const failedCombos = [];
+              for (const range of monthRanges) {
+                for (const { key, label } of ADS_REPORT_KEYS) {
+                  const comboLabel = `${label} ${range.label}`;
+                  try {
+                    const adsReportId = await scheduleAdsReport(adsTabId, { fromDate: range.fromDate, toDate: range.toDate, reportKey: key });
+                    console.log(TAG, `bulk: ads report requested for ${comboLabel} - id=${adsReportId} tabId=${adsTabId}`);
+                    requestedCount++;
+                  } catch (e) {
+                    console.warn(TAG, `bulk: ads report request failed for ${comboLabel} -`, e?.message);
+                    failedCombos.push(comboLabel);
+                  }
+                }
+              }
+              if (!requestedCount) {
+                sub[cat] = { phase: 'failed', error: `Could not request any report (${failedCombos.join(', ')}).` };
+              } else {
+                sub[cat] = { phase: 'requested', requestedCount, totalRequests, totalMonths: monthRanges.length, failedCombos };
+              }
+            }
           }
         } catch (e) {
           sub[cat] = { phase: 'failed', error: e?.message || 'Could not request this report.' };
@@ -1876,7 +1966,7 @@ async function bulkSyncTick() {
             tasks.push({ referenceId: s.referenceId, filename: buildFbaReturnsFilename(job.fromDate, job.toDate, '.csv'), zipFolder: 'FBA_Returns', kind: 'fbaReturns', cat });
           }
         } else if (s.phase === 'requested') {
-          requested.push({ cat, label: BULK_CATEGORY_LABELS[cat] });
+          requested.push({ cat, label: BULK_CATEGORY_LABELS[cat], requestCount: s.requestedCount || null });
         } else if (s.phase === 'empty') {
           noData.push({ cat, label: BULK_CATEGORY_LABELS[cat], reason: s.error });
         } else if (s.phase === 'failed') {
@@ -1898,7 +1988,10 @@ async function bulkSyncTick() {
       }
 
       const requestedNote = requested.length
-        ? requested.map((r) => `${r.label}: report requested - Amazon takes 15+ minutes to generate it, check the Reports page to download it manually.`).join(' | ')
+        ? requested.map((r) => {
+            const countText = r.requestCount ? `${r.requestCount} report${r.requestCount > 1 ? 's' : ''} requested (Sponsored Products/Brands/Display × qualifying months)` : 'report requested';
+            return `${r.label}: ${countText} - Amazon takes 15+ minutes to generate each, check the Reports page to download them manually.`;
+          }).join(' | ')
         : null;
 
       if (!tasks.length) {
