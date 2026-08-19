@@ -563,13 +563,17 @@ const PAGE_REQUIREMENTS = {
     readyCheck: 'RETURNS_PAGE_READY',
     neededFor: ['schedule'], // poll/download are CSRF-free - confirmed, no page needed for those
   },
-  // No confirmed URL exists yet for this one (never captured - the account
-  // that built this originally isn't the one in use now). `url` starts null
-  // and is learned automatically the first time a call succeeds on whatever
-  // tab the user manually opened it in - see cachePageUrl below.
+  // Confirmed live (screenshot, 27 Jul 2026): Fulfilment Reports -> FBA
+  // customer returns settles at this fixed path. Like `returns` above,
+  // sellercentral.amazon.in pages are session/cookie-scoped rather than
+  // parameterized by account in the URL (unlike Ads' entityId), so this one
+  // URL should work for any seller/tenant without ever needing to visit the
+  // page first. cachePageUrl-learned URLs (see resolvePageForCategory) are
+  // now a fallback behind this, kept in case a future Seller Central
+  // redesign or marketplace variant ever moves this path.
   fbaReturns: {
     label: 'FBA Customer Returns',
-    url: null,
+    url: 'https://sellercentral.amazon.in/reportcentral/CUSTOMER_RETURNS/1',
     readyCheck: 'FBA_RETURNS_PAGE_READY',
     neededFor: ['schedule', 'poll'], // both need the page - confirmed, both throw csrfMissing
   },
@@ -668,31 +672,55 @@ async function resolvePageForCategory(job, cat, step) {
     return job.navTabId;
   }
 
-  const url = requirement.url || (await getCachedPageUrl(cat));
-  if (!url) {
-    // Nothing to navigate to yet - fall back to job.tabId, whose own
-    // csrfMissing error keeps asking the user to open the page manually,
-    // exactly as before. The moment they do, the schedule/poll call that
-    // follows reports pageUrl back and this becomes available from then on.
-    return job.tabId;
-  }
-
+  // Covers the case where the user already has the right page open
+  // themselves (in any tab) - checked before any URL is even needed, so it
+  // also catches this on a first-ever run before anything has been learned.
   const existing = await findReadyTabForRequirement(requirement);
   if (existing) {
     await releaseNavTab(job); // a temp tab opened for a *previous* category is no longer needed
+    // Don't trust it as-is. checkPageReady only confirms *some* CSRF token
+    // is present in that tab's DOM - not that it's current. A tab that's
+    // simply been sitting open still carries whatever seller account was
+    // selected the last time IT actually loaded a page: Amazon's account
+    // switcher updates cookies globally the instant you switch, but only a
+    // page that (re)loads afterward picks that up. Silently reusing this
+    // tab as-is was the actual cause of syncs pulling the previous seller
+    // account's data with no error after switching accounts without a
+    // manual page refresh - this forced reload IS that refresh, done for
+    // you, before any report call is ever made against the tab.
+    const url = requirement.url || (await getCachedPageUrl(cat)) || (await chrome.tabs.get(existing)).url;
+    await navigateAndPreparePage(existing, requirement, url);
     return existing;
   }
 
-  if (!job.navTabId) {
-    const tab = await chrome.tabs.create({ url, active: false });
-    job.navTabId = tab.id;
-    job.navTabOwned = true;
-  } else {
-    await chrome.tabs.update(job.navTabId, { url });
+  // Try the confirmed/hardcoded URL first, then whatever was previously
+  // learned for this account via cachePageUrl - a fallback for if the
+  // hardcoded one ever stops working (a Seller Central redesign, a
+  // marketplace variant, etc). Only if every candidate fails to load do we
+  // fall back to job.tabId, whose own csrfMissing error asks the seller to
+  // open the page once manually - same safety net as before, just now a
+  // last resort instead of the common case.
+  const cachedUrl = await getCachedPageUrl(cat);
+  const candidates = [...new Set([requirement.url, cachedUrl].filter(Boolean))];
+  if (!candidates.length) return job.tabId;
+
+  for (const url of candidates) {
+    if (!job.navTabId) {
+      const tab = await chrome.tabs.create({ url, active: false });
+      job.navTabId = tab.id;
+      job.navTabOwned = true;
+    } else {
+      await chrome.tabs.update(job.navTabId, { url });
+    }
+    job.navTabFor = cat;
+    try {
+      await navigateAndPreparePage(job.navTabId, requirement, url);
+      return job.navTabId;
+    } catch (_) {
+      // try the next candidate, if any
+    }
   }
-  job.navTabFor = cat;
-  await navigateAndPreparePage(job.navTabId, requirement, url);
-  return job.navTabId;
+  return job.tabId;
 }
 
 // Only closes tabs this run opened itself - a tab the user already had open
@@ -714,7 +742,16 @@ async function releaseNavTab(job) {
 async function resolveAdsTab() {
   const requirement = PAGE_REQUIREMENTS.ads;
   const existing = await findReadyTabForRequirement(requirement);
-  if (existing) return { tabId: existing, opened: false };
+  if (existing) {
+    // Same reasoning as resolvePageForCategory's identical check: don't trust
+    // an already-open tab as-is just because it has *some* CSRF token -
+    // force a fresh navigation so it reflects whichever seller account is
+    // currently selected, not whichever one was active the last time this
+    // specific tab happened to load.
+    const url = requirement.url || (await getCachedPageUrl('ads')) || (await chrome.tabs.get(existing)).url;
+    await navigateAndPreparePage(existing, requirement, url);
+    return { tabId: existing, opened: false };
+  }
 
   const url = requirement.url || (await getCachedPageUrl('ads'));
   if (!url) return { tabId: null, opened: false };
