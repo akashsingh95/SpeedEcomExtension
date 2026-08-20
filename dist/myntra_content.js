@@ -44,12 +44,46 @@
     return { status: res.status, body };
   }
 
+  // Confirmed live via DevTools inspection: the page header's subtitle line
+  // on the Partner Portal (e.g. "BANDHANI VILLA" under "Business Growth
+  // Dashboard" - <div class="aui-text-body p-pageHeader-module-css-
+  // pageHeaderSubtitle aui-text-dark aui-text-high display-initial">).
+  // Matched by a stable substring of the CSS-module class name rather than
+  // the exact string, in case a build ever changes the module hash/prefix.
+  function readSellerAccountName() {
+    const el = document.querySelector('[class*="pageHeaderSubtitle" i]');
+    const text = el?.textContent?.trim();
+    if (text) return text;
+
+    // Fallback guesses, not confirmed - kept only in case the sync ever runs
+    // from a Partner Portal page that doesn't render this header at all.
+    const selectors = [
+      '[class*="businessName" i]', '[class*="business-name" i]', '[class*="BusinessName" i]',
+      '[class*="storeName" i]', '[class*="store-name" i]', '[class*="StoreName" i]',
+      '[class*="sellerName" i]', '[class*="seller-name" i]',
+      '[data-testid*="business" i]', '[data-testid*="store" i]', '[data-testid*="seller" i]',
+    ];
+    for (const sel of selectors) {
+      const fallbackEl = document.querySelector(sel);
+      const fallbackText = fallbackEl?.textContent?.trim();
+      if (fallbackText) return fallbackText;
+    }
+    return null;
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // Lets background.js cheaply confirm this content script is alive before
     // relying on it - a tab that was open before the extension loaded (or was
     // discarded/reloaded) won't answer this.
     if (msg?.type === 'PING') {
       sendResponse({ ok: true });
+      return false;
+    }
+
+    // Returns null (not an error) when nothing matches, so background.js can
+    // fall back to the SpeedEcom tenant name instead of failing the zip.
+    if (msg?.type === 'GET_SELLER_ACCOUNT_NAME') {
+      sendResponse({ name: readSellerAccountName() });
       return false;
     }
 

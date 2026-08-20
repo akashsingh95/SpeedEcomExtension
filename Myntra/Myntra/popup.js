@@ -6,9 +6,6 @@ function isoDate(d) {
   const pad = (v) => String(v).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
-function todayStamp() {
-  return isoDate(new Date());
-}
 
 // Myntra's payment data for the last 2 days is still settling - only up to
 // 2 days ago is treated as a complete, selectable day (e.g. if today is
@@ -115,7 +112,6 @@ $('sync').addEventListener('click', async () => {
   const types = [];
   if ($('typePrepaid').checked) types.push('PREPAID');
   if ($('typePostpaid').checked) types.push('POSTPAID');
-  const zipName = $('zipName').value.trim() || `Myntra_Payments_${todayStamp()}`;
 
   const maxDate = maxSelectableDate();
   if (!fromDate || !toDate) { showFormError('Pick a date range first.'); return; }
@@ -130,7 +126,7 @@ $('sync').addEventListener('click', async () => {
   render({ active: true, total: 0, done: 0, failed: 0, failures: [], current: 'Starting sync...', finished: false, error: null, paused: false, cancelled: false });
   try { await chrome.storage.local.remove('syncProgress'); } catch (_) {}
   try {
-    await chrome.runtime.sendMessage({ type: 'START_PAYMENT_SYNC', fromDate, toDate, types, zipName });
+    await chrome.runtime.sendMessage({ type: 'START_PAYMENT_SYNC', fromDate, toDate, types });
   } catch (_) {
     $('sync').disabled = false;
   }
@@ -155,7 +151,6 @@ async function initMainApp() {
   $('toDate').max = maxDate;
   $('fromDate').value = isoDate(past);
   $('toDate').value = maxDate;
-  $('zipName').value = `Myntra_Payments_${todayStamp()}`;
 
   // A finished result (success or error) from a previous session should never
   // resurface just because the popup was reopened - only an in-progress sync

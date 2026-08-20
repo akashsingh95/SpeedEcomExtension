@@ -415,6 +415,39 @@ async function sendToTabWithRecovery(tabId, message) {
   }
 }
 
+// The Speed Ecom account's registered business/company name - fallback only,
+// used when the live Myntra seller name can't be scraped (content script
+// unreachable, page structure changed, etc.), same pattern as Amazon's
+// getTenantName()/fetchSellerAccountName().
+async function getTenantName() {
+  let auth;
+  try {
+    ({ auth } = await chrome.storage.local.get('auth'));
+  } catch (_) {
+    return 'Myntra';
+  }
+  return auth?.user?.name || 'Myntra';
+}
+
+async function fetchSellerAccountName(tabId) {
+  try {
+    const resp = await sendToTabWithRecovery(tabId, { type: 'GET_SELLER_ACCOUNT_NAME' });
+    return resp?.name || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Builds the ZIP's filename - no more user-editable "ZIP file name" field,
+// it's always derived from the live seller/business name (scraped from the
+// Partner Portal page) and the requested date range, same idea as Amazon's
+// buildZipName()/Meesho's Meesho_<Shop>_<from>_to_<to>.zip.
+async function buildZipName(fromDate, toDate, tabId) {
+  const scraped = tabId ? await fetchSellerAccountName(tabId) : null;
+  const seller = safeZipName(scraped || (await getTenantName()));
+  return `Myntra_Payments_${seller}_${fromDate}_to_${toDate}`;
+}
+
 function safeZipName(s) {
   return (
     String(s || 'Myntra_Payments')
@@ -612,7 +645,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           throw new Error('Could not connect to the Myntra tab. Please reload the page and try again.');
         }
 
-        const { fromDate, toDate, types, zipName } = msg;
+        const { fromDate, toDate, types } = msg;
         if (!fromDate || !toDate) throw new Error('Pick a date range first.');
         if (!Array.isArray(types) || !types.length) throw new Error('Select Prepaid and/or Postpaid first.');
 
@@ -625,7 +658,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        await processDownloadQueue(tasks, safeZipName(zipName));
+        await processDownloadQueue(tasks, await buildZipName(fromDate, toDate, tab.id));
       } catch (e) {
         if (e?.cancelled) {
           // Cancelled during collection, before any file existed to zip -
