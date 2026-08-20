@@ -429,13 +429,86 @@ async function getTenantName() {
   return auth?.user?.name || 'Myntra';
 }
 
+// Confirmed live to always render the seller/business name (unlike the
+// public marketing homepage or the Profile/Terms page, which don't).
+const MYNTRA_DASHBOARD_URL = 'https://partners.myntrainfo.com/Dashboard?tab=overview';
+
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, timeoutMs);
+    function listener(id, changeInfo) {
+      if (id === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// Last resort when no already-open Myntra tab has the seller name (e.g. the
+// seller only ever has one Partner Portal tab open, and it isn't on the
+// Dashboard): opens a hidden background tab to the Dashboard, fetches the
+// name, then closes it again - session cookies are shared across tabs of
+// the same origin, so this loads already logged in. Mirrors Amazon's
+// resolvePageForCategory/navigateAndPreparePage pattern (open a dedicated
+// temp tab for a page-bound value), scaled down to a single one-shot fetch
+// since nothing here needs to persist across a service-worker restart.
+async function fetchSellerNameViaHiddenTab() {
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: MYNTRA_DASHBOARD_URL, active: false });
+    await waitForTabComplete(tab.id);
+    if (!(await ensureContentScript(tab.id))) return null;
+    // Chrome's 'complete' tab status fires once the Dashboard's initial page
+    // shell loads - but it's a data-driven SPA, and the business name itself
+    // only appears in the DOM a few seconds later, once an async API call
+    // finishes and the page re-renders. A single check right after 'complete'
+    // was confirmed live to land in that gap and find nothing, so this polls
+    // instead of checking once.
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      let resp;
+      try { resp = await sendToTab(tab.id, { type: 'GET_SELLER_ACCOUNT_NAME' }); } catch (_) { resp = null; }
+      if (resp?.name) return resp.name;
+      await sleep(600);
+    }
+    return null;
+  } catch (e) {
+    console.warn(TAG, 'hidden-tab seller name fetch failed:', e?.message);
+    return null;
+  } finally {
+    if (tab) { try { await chrome.tabs.remove(tab.id); } catch (_) {} }
+  }
+}
+
+// The seller/business name only renders on certain Partner Portal pages
+// (confirmed live: present on Dashboard, absent on the public marketing
+// homepage and the Profile/Terms page) - not a persistent header on every
+// page. So a sync started from a tab that happens to be on one of those
+// other pages would otherwise fall back to the SpeedEcom tenant name even
+// while a Dashboard tab sitting right next to it has the real answer. Tries
+// the sync tab first (the common case, no extra work), then every other
+// open Myntra tab, then finally a hidden Dashboard tab opened just for this.
 async function fetchSellerAccountName(tabId) {
   try {
     const resp = await sendToTabWithRecovery(tabId, { type: 'GET_SELLER_ACCOUNT_NAME' });
-    return resp?.name || null;
-  } catch (_) {
-    return null;
-  }
+    if (resp?.name) return resp.name;
+  } catch (_) {}
+
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://partners.myntrainfo.com/*' });
+    for (const t of tabs) {
+      if (t.id === tabId) continue; // already tried above
+      try {
+        const resp = await sendToTabWithRecovery(t.id, { type: 'GET_SELLER_ACCOUNT_NAME' });
+        if (resp?.name) return resp.name;
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  return fetchSellerNameViaHiddenTab();
 }
 
 // Builds the ZIP's filename - no more user-editable "ZIP file name" field,
