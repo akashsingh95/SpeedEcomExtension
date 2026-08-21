@@ -92,7 +92,26 @@ function extractUser(body) {
   if (!u || typeof u !== 'object') return {};
   const name = u.name || u.fullName || u.full_name || u.business_name || u.businessName || u.company || u.displayName || u.username || null;
   const email = u.email || u.emailAddress || u.email_address || null;
-  return { name, email };
+
+  // Which marketplace panels this tenant should even see, so the chooser
+  // list (shell/chooser.js) can hide the ones they have no access to
+  // instead of always showing all three. tenantId.activatedMarketplaces is
+  // one entry per linked marketplace ACCOUNT (a tenant can have several
+  // under the same marketplace) - confirmed live via a full
+  // GET /api/auth/profile capture - reduced here to one boolean per
+  // marketplace this extension actually has a panel for. Kept identical to
+  // Amazon's/Myntra's copy of this function since any of the three panels'
+  // own AUTH_REFRESH_PROFILE can overwrite the shared `auth.user` record.
+  const activatedList = Array.isArray(u.tenantId?.activatedMarketplaces) ? u.tenantId.activatedMarketplaces : [];
+  const hasMarketplace = (needle) =>
+    activatedList.some((m) => String(m?.marketplaceName || '').toLowerCase().includes(needle));
+  const marketplaces = {
+    amazon: hasMarketplace('amazon'),
+    meesho: hasMarketplace('meesho'),
+    myntra: hasMarketplace('myntra'),
+  };
+
+  return { name, email, marketplaces };
 }
 
 async function authLogin(email, password) {

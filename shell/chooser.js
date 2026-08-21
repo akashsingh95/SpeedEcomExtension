@@ -134,7 +134,7 @@
     });
 
     $('list').appendChild(row);
-    rows[m.id] = { status, bar, fill };
+    rows[m.id] = { row, status, bar, fill };
   }
 
   function paint(m, info) {
@@ -170,6 +170,17 @@
     $('avatar').textContent = initials(user);
     $('acctName').textContent = (user && (user.name || user.fullName)) || 'Signed in';
     $('acctEmail').textContent = (user && user.email) || '';
+
+    // Only show marketplaces this SpeedEcom account actually has (per
+    // GET /api/auth/profile's tenantId.activatedMarketplaces, reduced to
+    // booleans by extractUser() in each background.js). A stored `auth.user`
+    // from before this feature shipped (or a fetch that hasn't completed
+    // yet) has no `marketplaces` field at all - defaults to hiding every
+    // row rather than showing all three, so a real entitlement-lookup bug
+    // fails loudly (nothing shown) instead of quietly granting access to
+    // everything; the next AUTH_REFRESH_PROFILE self-heals it.
+    const entitled = (user && user.marketplaces) || {};
+    for (const m of MARKETS) rows[m.id].row.hidden = !entitled[m.id];
   }
 
   async function refresh() {
@@ -184,6 +195,24 @@
       showLogin();
       return;
     }
+
+    // Marketplace entitlements (auth.user.marketplaces) were added after
+    // some sessions may already be logged in - a stored auth.user from
+    // before this shipped has no such field yet. Unlike a marketplace's own
+    // popup.js, this chooser never had a reason to call AUTH_REFRESH_PROFILE
+    // itself before, so without this, a user who never happens to open a
+    // specific panel would never pick up the new field - and since every
+    // row starts hidden until it's known, there'd be nothing left to click
+    // into to trigger a refresh from. Only awaited when the field is
+    // missing, so this doesn't add a network call to every popup open once
+    // it's cached.
+    if (!data.auth.user || !data.auth.user.marketplaces) {
+      try {
+        const resp = await authBus.runtime.sendMessage({ type: 'AUTH_REFRESH_PROFILE' });
+        if (resp && resp.ok && resp.user) data.auth = { ...data.auth, user: resp.user };
+      } catch (_) {}
+    }
+
     showList(data.auth.user || {});
 
     for (const m of MARKETS) {

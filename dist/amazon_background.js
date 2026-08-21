@@ -106,7 +106,28 @@ function extractUser(body) {
   // on the populated tenant record instead (`GET /api/auth/profile`'s
   // `tenantId.name`, per server/controllers/authController.js's getProfile).
   const tenant = u.tenantId?.name || u.tenant?.name || null;
-  return { name, email, tenant };
+
+  // Which marketplace panels this tenant should even see, so the chooser
+  // list (shell/chooser.js) can hide the ones they have no access to
+  // instead of always showing all three. tenantId.activatedMarketplaces is
+  // one entry per linked marketplace ACCOUNT (a tenant can have several
+  // under the same marketplace, e.g. multiple "Amazon India (Seller)"
+  // entries) - confirmed live via a full GET /api/auth/profile capture -
+  // not a simple per-marketplace boolean, so it's reduced to one here per
+  // marketplace this extension actually has a panel for. Flipkart also
+  // appears in that list but has no panel in this extension yet, so a
+  // tenant with only Flipkart accounts correctly ends up with all three
+  // rows hidden until a Flipkart panel exists.
+  const activatedList = Array.isArray(u.tenantId?.activatedMarketplaces) ? u.tenantId.activatedMarketplaces : [];
+  const hasMarketplace = (needle) =>
+    activatedList.some((m) => String(m?.marketplaceName || '').toLowerCase().includes(needle));
+  const marketplaces = {
+    amazon: hasMarketplace('amazon'),
+    meesho: hasMarketplace('meesho'),
+    myntra: hasMarketplace('myntra'),
+  };
+
+  return { name, email, tenant, marketplaces };
 }
 
 async function authLogin(email, password) {
